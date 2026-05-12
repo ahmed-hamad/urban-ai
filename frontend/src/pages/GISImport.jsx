@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/context/AuthContext'
 import {
   Layers, Upload, FileJson, Map, CheckCircle2, XCircle, AlertTriangle,
   RefreshCw, Database, Settings2, Eye, Clock, ChevronRight, X,
-  Trash2, ShieldAlert,
+  Trash2, ShieldAlert, ArrowLeft,
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
@@ -47,11 +48,76 @@ const OWNERSHIP_TYPE_OPTIONS = [
   { value: 'shared',     label: 'مسؤولية مشتركة' },
 ]
 
-const FIELD_OPTIONS_REPORTS = [
-  { key: 'elementType',  label: 'نوع العنصر' },
-  { key: 'description',  label: 'الوصف' },
-  { key: 'locationName', label: 'اسم الموقع' },
-  { key: 'district',     label: 'الحي / المنطقة' },
+const ENTERPRISE_FIELD_CATEGORIES = [
+  {
+    category: 'basic',
+    label: 'الحقول الأساسية',
+    fields: [
+      { key: 'elementType',  label: 'نوع العنصر *' },
+      { key: 'description',  label: 'الوصف *' },
+      { key: 'locationName', label: 'اسم الموقع *' },
+    ],
+  },
+  {
+    category: 'geographic',
+    label: 'الحقول الجغرافية والإدارية',
+    fields: [
+      { key: 'district',      label: 'الحي / المنطقة *' },
+      { key: 'municipality',  label: 'البلدية' },
+      { key: 'subdistrict',   label: 'الحي الفرعي' },
+      { key: 'street',        label: 'الشارع' },
+    ],
+  },
+  {
+    category: 'identity',
+    label: 'الهوية والمرجعية',
+    fields: [
+      { key: 'externalId',     label: 'المعرف الخارجي' },
+      { key: 'sourceSystemId', label: 'معرف النظام المصدر' },
+      { key: 'referenceNo',    label: 'رقم المرجع' },
+    ],
+  },
+  {
+    category: 'operational',
+    label: 'المعلومات التشغيلية',
+    fields: [
+      { key: 'contractor', label: 'المقاول' },
+      { key: 'contractId', label: 'رقم العقد' },
+      { key: 'agency',     label: 'الجهة المسؤولة' },
+      { key: 'assetId',    label: 'رقم الأصل' },
+    ],
+  },
+  {
+    category: 'violation',
+    label: 'بيانات المخالفة',
+    fields: [
+      { key: 'violationType',     label: 'نوع المخالفة' },
+      { key: 'violationCategory', label: 'فئة المخالفة' },
+      { key: 'severity',          label: 'الخطورة' },
+      { key: 'fineAmount',        label: 'مبلغ الغرامة' },
+      { key: 'priorityLevel',     label: 'مستوى الأولوية' },
+      { key: 'sourceStatus',      label: 'الحالة في المصدر' },
+    ],
+  },
+  {
+    category: 'dates',
+    label: 'التواريخ',
+    fields: [
+      { key: 'observationDate', label: 'تاريخ الرصد' },
+      { key: 'inspectionDate',  label: 'تاريخ المعاينة' },
+      { key: 'deadlineDate',    label: 'تاريخ الاستحقاق' },
+    ],
+  },
+  {
+    category: 'additional',
+    label: 'بيانات إضافية',
+    fields: [
+      { key: 'ownerName',     label: 'اسم المالك' },
+      { key: 'ownerContact',  label: 'بيانات التواصل' },
+      { key: 'inspectorName', label: 'اسم المفتش' },
+      { key: 'remarks',       label: 'ملاحظات إضافية' },
+    ],
+  },
 ]
 
 const FIELD_OPTIONS_OPERATIONAL = [
@@ -282,35 +348,97 @@ function DropZone({ onFile }) {
 
 // ─── Field mapping ────────────────────────────────────────────────────────────
 
-function FieldMapping({ sourceFields, fieldMapping, onChange, fieldOptions }) {
+function FieldSelect({ fieldKey, label, sourceFields, fieldMapping, onChange }) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-500 dark:text-gray-400 mb-1">{label}</label>
+      <select
+        value={fieldMapping[fieldKey] ?? ''}
+        onChange={e => {
+          const updated = { ...fieldMapping }
+          if (e.target.value) updated[fieldKey] = e.target.value
+          else delete updated[fieldKey]
+          onChange(updated)
+        }}
+        className="w-full text-sm rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-slate-800 dark:text-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500"
+      >
+        <option value="">— غير مرتبط —</option>
+        {sourceFields.map(f => <option key={f} value={f}>{f}</option>)}
+      </select>
+    </div>
+  )
+}
+
+function FieldMapping({ sourceFields, fieldMapping, onChange, fieldCategories, fieldOptions }) {
+  const [openCategories, setOpenCategories] = useState(() => new Set(['basic', 'geographic']))
+
   if (!sourceFields.length) return null
+
+  function toggleCategory(cat) {
+    setOpenCategories(prev => {
+      const next = new Set(prev)
+      next.has(cat) ? next.delete(cat) : next.add(cat)
+      return next
+    })
+  }
+
+  const mappedCount = Object.keys(fieldMapping).filter(k => fieldMapping[k]).length
+
   return (
     <div className="bg-white dark:bg-gray-900 rounded-2xl border border-slate-200 dark:border-gray-800 p-5 space-y-4">
       <div className="flex items-center gap-2">
         <Settings2 size={15} className="text-slate-400 dark:text-gray-500" />
         <h3 className="text-sm font-semibold text-slate-800 dark:text-white">تعيين الحقول</h3>
+        {mappedCount > 0 && (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400">
+            {mappedCount} مرتبط
+          </span>
+        )}
         <span className="text-xs text-slate-400 dark:text-gray-500 mr-auto">اربط حقول الملف بحقول النظام</span>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {fieldOptions.map(opt => (
-          <div key={opt.key}>
-            <label className="block text-xs font-medium text-slate-500 dark:text-gray-400 mb-1">{opt.label}</label>
-            <select
-              value={fieldMapping[opt.key] ?? ''}
-              onChange={e => {
-                const updated = { ...fieldMapping }
-                if (e.target.value) updated[opt.key] = e.target.value
-                else delete updated[opt.key]
-                onChange(updated)
-              }}
-              className="w-full text-sm rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-slate-800 dark:text-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500"
-            >
-              <option value="">— غير مرتبط —</option>
-              {sourceFields.map(f => <option key={f} value={f}>{f}</option>)}
-            </select>
-          </div>
-        ))}
-      </div>
+
+      {/* Enterprise categorized layout */}
+      {fieldCategories ? (
+        <div className="space-y-2">
+          {fieldCategories.map(cat => {
+            const isOpen = openCategories.has(cat.category)
+            const catMapped = cat.fields.filter(f => fieldMapping[f.key]).length
+            return (
+              <div key={cat.category} className="border border-slate-200 dark:border-gray-700 rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => toggleCategory(cat.category)}
+                  className="w-full flex items-center gap-2 px-3 py-2.5 bg-slate-50 dark:bg-gray-800/60 hover:bg-slate-100 dark:hover:bg-gray-800 transition-colors text-right"
+                >
+                  <ChevronRight size={13} className={`text-slate-400 dark:text-gray-500 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                  <span className="text-xs font-semibold text-slate-700 dark:text-gray-200 flex-1">{cat.label}</span>
+                  {catMapped > 0 && (
+                    <span className="text-xs px-1.5 py-0.5 rounded-full bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400">
+                      {catMapped}/{cat.fields.length}
+                    </span>
+                  )}
+                </button>
+                {isOpen && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3">
+                    {cat.fields.map(f => (
+                      <FieldSelect key={f.key} fieldKey={f.key} label={f.label}
+                        sourceFields={sourceFields} fieldMapping={fieldMapping} onChange={onChange} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        /* Flat layout for operational layers */
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {(fieldOptions ?? []).map(opt => (
+            <FieldSelect key={opt.key} fieldKey={opt.key} label={opt.label}
+              sourceFields={sourceFields} fieldMapping={fieldMapping} onChange={onChange} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -687,6 +815,7 @@ function SpatialLayersManager({ token }) {
 
 export default function GISImport() {
   const { user } = useAuth()
+  const navigate  = useNavigate()
   const hasToken = !!user?.token
 
   // Layer configuration state
@@ -952,13 +1081,14 @@ export default function GISImport() {
                 </div>
               )}
 
-              {/* Field mapping (once preview is ready — reports only) */}
+              {/* Field mapping (once preview is ready) */}
               {isPreviewReady && sourceFields.length > 0 && (
                 <FieldMapping
                   sourceFields={sourceFields}
                   fieldMapping={fieldMapping}
                   onChange={setFieldMapping}
-                  fieldOptions={job?.layer_type === 'reports' ? FIELD_OPTIONS_REPORTS : FIELD_OPTIONS_OPERATIONAL}
+                  fieldCategories={job?.layer_type === 'reports' ? ENTERPRISE_FIELD_CATEGORIES : null}
+                  fieldOptions={job?.layer_type !== 'reports' ? FIELD_OPTIONS_OPERATIONAL : null}
                 />
               )}
 
@@ -1000,95 +1130,30 @@ export default function GISImport() {
                 </div>
               )}
 
-              {/* Import action — only for report layers that require user confirmation */}
+              {/* Governance gate — report layers go through GIS Intake Queue, not direct bulk import */}
               {isPreviewReady && !importResult && job?.layer_type === 'reports' && (
-                <div className="space-y-4">
-                  {/* Import scope selector */}
-                  <div className="border border-slate-200 dark:border-gray-700 rounded-2xl p-4 space-y-3 bg-slate-50 dark:bg-gray-800/50">
-                    <p className="text-sm font-semibold text-slate-700 dark:text-gray-200">
-                      كم عنصراً تريد استيراده؟
-                      <span className="mr-1 font-normal text-slate-500 dark:text-gray-400">
-                        ({(job.valid_features ?? 0).toLocaleString()} عنصر صالح متاح)
-                      </span>
-                    </p>
-
-                    {/* Mode toggle */}
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setImportMode('all')}
-                        className={`flex-1 py-2 rounded-xl text-sm font-medium border transition-colors ${
-                          importMode === 'all'
-                            ? 'bg-teal-600 text-white border-teal-600'
-                            : 'bg-white dark:bg-gray-800 text-slate-600 dark:text-gray-300 border-slate-200 dark:border-gray-700 hover:border-teal-400'
-                        }`}
-                      >
-                        استيراد الكل
-                      </button>
-                      <button
-                        onClick={() => setImportMode('limit')}
-                        className={`flex-1 py-2 rounded-xl text-sm font-medium border transition-colors ${
-                          importMode === 'limit'
-                            ? 'bg-teal-600 text-white border-teal-600'
-                            : 'bg-white dark:bg-gray-800 text-slate-600 dark:text-gray-300 border-slate-200 dark:border-gray-700 hover:border-teal-400'
-                        }`}
-                      >
-                        عدد محدد
-                      </button>
-                    </div>
-
-                    {/* Limit inputs */}
-                    {importMode === 'limit' && (
-                      <div className="flex gap-3">
-                        <div className="flex-1 space-y-1">
-                          <label className="text-xs text-slate-500 dark:text-gray-400">عدد العناصر</label>
-                          <input
-                            type="number" min="1" max={job.valid_features ?? undefined}
-                            value={importLimit}
-                            onChange={e => setImportLimit(e.target.value)}
-                            placeholder="مثال: 500"
-                            className="w-full rounded-xl border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-3 py-2 text-slate-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-teal-400"
-                          />
-                        </div>
-                        <div className="flex-1 space-y-1">
-                          <label className="text-xs text-slate-500 dark:text-gray-400">ابدأ من العنصر رقم</label>
-                          <input
-                            type="number" min="0"
-                            value={importOffset}
-                            onChange={e => setImportOffset(e.target.value)}
-                            placeholder="0 (البداية)"
-                            className="w-full rounded-xl border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-3 py-2 text-slate-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-teal-400"
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {importMode === 'limit' && importLimit && (
-                      <p className="text-xs text-teal-600 dark:text-teal-400">
-                        سيتم استيراد {Number(importLimit).toLocaleString()} عنصر
-                        {importOffset ? ` بدءاً من العنصر ${Number(importOffset).toLocaleString()}` : ''}.
+                <div className="space-y-3">
+                  <div className="flex items-start gap-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-500/30 rounded-2xl p-4">
+                    <Database size={16} className="text-teal-500 dark:text-teal-400 flex-shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-teal-800 dark:text-teal-200">
+                        {(job.valid_features ?? 0).toLocaleString()} عنصر بانتظار المراجعة في قائمة استيراد GIS
                       </p>
-                    )}
+                      <p className="text-xs text-teal-700 dark:text-teal-300">
+                        تقتضي حوكمة المنصة مراجعة كل عنصر GIS بشكل فردي قبل إنشاء البلاغ المقابل.
+                        يمكنك تأكيد العناصر بشكل فردي أو جماعي عبر قائمة المراجعة.
+                      </p>
+                    </div>
                   </div>
 
-                  {error && (
-                    <div className="flex items-center gap-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-700 dark:text-red-400">
-                      <AlertTriangle size={14} className="flex-shrink-0" /> {error}
-                    </div>
-                  )}
-
-                  <button onClick={handleImport} disabled={importing || !job.valid_features}
-                    className="w-full flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold py-3 rounded-xl transition-colors disabled:opacity-50">
-                    {importing
-                      ? <><RefreshCw size={15} className="animate-spin" /> جارٍ الاستيراد…</>
-                      : <><Database size={15} /> {
-                          importMode === 'all'
-                            ? `استيراد الكل (${(job.valid_features ?? 0).toLocaleString()} عنصر)`
-                            : `استيراد ${(Number(importLimit) || 0).toLocaleString()} عنصر`
-                        }</>
-                    }
+                  <button
+                    onClick={() => navigate(`/gis-intake?job=${job.id}`)}
+                    className="w-full flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold py-3 rounded-xl transition-colors">
+                    <ArrowLeft size={15} />
+                    انتقل إلى قائمة مراجعة عناصر GIS ({(job.valid_features ?? 0).toLocaleString()} عنصر)
                   </button>
                   <p className="text-xs text-center text-slate-400 dark:text-gray-500">
-                    العناصر غير الصالحة ({job.invalid_features ?? 0}) ستُستبعد تلقائياً.
+                    العناصر غير الصالحة ({job.invalid_features ?? 0}) مستبعدة تلقائياً.
                   </p>
                 </div>
               )}

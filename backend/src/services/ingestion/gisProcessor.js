@@ -109,19 +109,20 @@ function buildResults(features, fieldMapping, detectedCrs) {
     }
 
     results.push({
-      featureIndex:      i,
-      sourceFeatureId:   String(feature.id ?? feature.properties?.id ?? i),
-      geometry:          feature.geometry,
-      geometryType:      feature.geometry?.type ?? null,
-      sourceAttributes:  feature.properties ?? {},
-      mappedElementType: mapped.elementType,
-      mappedDescription: mapped.description,
+      featureIndex:       i,
+      sourceFeatureId:    String(feature.id ?? feature.properties?.id ?? i),
+      geometry:           feature.geometry,
+      geometryType:       feature.geometry?.type ?? null,
+      sourceAttributes:   feature.properties ?? {},
+      mappedElementType:  mapped.elementType,
+      mappedDescription:  mapped.description,
       mappedLocationName: mapped.locationName,
-      mappedDistrict:    mapped.district,
-      isValidGeometry:   validation.valid,
-      geometryError:     validation.error ?? null,
-      centroidLat:       centroid?.lat ?? null,
-      centroidLng:       centroid?.lng ?? null,
+      mappedDistrict:     mapped.district,
+      mappedOperational:  mapped,
+      isValidGeometry:    validation.valid,
+      geometryError:      validation.error ?? null,
+      centroidLat:        centroid?.lat ?? null,
+      centroidLng:        centroid?.lng ?? null,
     })
   }
 
@@ -151,10 +152,40 @@ function validateGeometry(geom) {
 function applyFieldMapping(properties, fieldMapping) {
   const get = (key) => (key && properties[key] != null ? String(properties[key]) : null)
   return {
-    elementType:  get(fieldMapping.elementType),
-    description:  get(fieldMapping.description),
-    locationName: get(fieldMapping.locationName),
-    district:     get(fieldMapping.district),
+    // Basic — dedicated columns in import_features
+    elementType:       get(fieldMapping.elementType),
+    description:       get(fieldMapping.description),
+    locationName:      get(fieldMapping.locationName),
+    district:          get(fieldMapping.district),
+    // Identity
+    externalId:        get(fieldMapping.externalId),
+    sourceSystemId:    get(fieldMapping.sourceSystemId),
+    referenceNo:       get(fieldMapping.referenceNo),
+    // Geographic / Administrative
+    municipality:      get(fieldMapping.municipality),
+    subdistrict:       get(fieldMapping.subdistrict),
+    street:            get(fieldMapping.street),
+    // Operational
+    contractor:        get(fieldMapping.contractor),
+    contractId:        get(fieldMapping.contractId),
+    agency:            get(fieldMapping.agency),
+    assetId:           get(fieldMapping.assetId),
+    // Violation
+    violationType:     get(fieldMapping.violationType),
+    violationCategory: get(fieldMapping.violationCategory),
+    severity:          get(fieldMapping.severity),
+    fineAmount:        get(fieldMapping.fineAmount),
+    priorityLevel:     get(fieldMapping.priorityLevel),
+    sourceStatus:      get(fieldMapping.sourceStatus),
+    // Dates
+    observationDate:   get(fieldMapping.observationDate),
+    inspectionDate:    get(fieldMapping.inspectionDate),
+    deadlineDate:      get(fieldMapping.deadlineDate),
+    // Additional
+    ownerName:         get(fieldMapping.ownerName),
+    ownerContact:      get(fieldMapping.ownerContact),
+    inspectorName:     get(fieldMapping.inspectorName),
+    remarks:           get(fieldMapping.remarks),
   }
 }
 

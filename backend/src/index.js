@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
+import path from 'path'
 import reportsRouter from './routes/reports.js'
 import usersRouter from './routes/users.js'
 import violationsRouter from './routes/violations.js'
@@ -13,6 +14,10 @@ const PORT = process.env.PORT || 3002
 
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }))
 app.use(express.json({ limit: '10mb' }))
+
+// Serve uploaded media files statically so frontend can preview them
+const UPLOAD_ROOT = process.env.UPLOAD_PATH ?? 'uploads'
+app.use('/uploads', express.static(path.resolve(UPLOAD_ROOT)))
 
 // Health check
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: new Date() }))

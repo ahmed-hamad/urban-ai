@@ -81,7 +81,9 @@ router.get('/:id/audit', requirePermission('view_reports'), async (req, res) => 
   }
 
   const { rows: logs } = await query(
-    `SELECT al.*, u.full_name AS performed_by_name
+    `SELECT al.*, u.full_name AS performed_by_name,
+            al.metadata->>'fromStatus' AS from_status,
+            al.metadata->>'toStatus'   AS to_status
      FROM audit_logs al
      LEFT JOIN users u ON u.id = al.performed_by
      WHERE al.subject_type = 'report' AND al.subject_id = $1
@@ -93,14 +95,52 @@ router.get('/:id/audit', requirePermission('view_reports'), async (req, res) => 
 })
 
 // GET /api/reports/:id
+// Returns full report details including: media attachments, GIS source attributes,
+// candidate media (fallback when report_media is empty), geometry.
 router.get('/:id', requirePermission('view_reports'), async (req, res) => {
   const scope = buildReportScope(req.user)
 
   const { rows } = await query(
-    `SELECT r.*, u1.full_name AS created_by_name, u2.full_name AS assigned_to_name
+    `SELECT r.*,
+            u1.full_name  AS created_by_name,
+            u2.full_name  AS assigned_to_name,
+            ST_AsGeoJSON(r.location)::json AS location_geojson,
+
+            -- GIS import: source feature attributes + geometry + enterprise mapped fields
+            imf.source_attributes    AS gis_source_attributes,
+            imf.mapped_element_type  AS gis_element_type,
+            imf.mapped_description   AS gis_description,
+            imf.mapped_operational   AS gis_mapped_operational,
+            ST_AsGeoJSON(imf.geometry)::json AS gis_geometry_geojson,
+
+            -- Media candidate: original uploaded file (fallback when no report_media)
+            dc.media_ingestion_id    AS candidate_ingestion_id,
+            mi.file_path             AS candidate_file_path,
+            mi.file_type             AS candidate_file_type,
+            mi.mime_type             AS candidate_mime_type,
+            mi.capture_timestamp     AS candidate_capture_timestamp,
+
+            -- Media attachments from report_media table (aggregated)
+            COALESCE((
+              SELECT json_agg(
+                json_build_object(
+                  'id',        rm.id,
+                  'file_path', rm.file_path,
+                  'file_type', rm.file_type,
+                  'mime_type', rm.mime_type,
+                  'phase',     rm.phase,
+                  'caption',   rm.caption
+                ) ORDER BY rm.created_at
+              )
+              FROM report_media rm WHERE rm.report_id = r.id
+            ), '[]'::json) AS media_attachments
+
      FROM reports r
-     LEFT JOIN users u1 ON u1.id = r.created_by
-     LEFT JOIN users u2 ON u2.id = r.assigned_to
+     LEFT JOIN users u1        ON u1.id  = r.created_by
+     LEFT JOIN users u2        ON u2.id  = r.assigned_to
+     LEFT JOIN import_features imf ON imf.id = r.import_feature_id
+     LEFT JOIN detection_candidates dc ON dc.id = r.detection_candidate_id
+     LEFT JOIN media_ingestions  mi ON mi.id  = dc.media_ingestion_id
      WHERE r.id = $1 AND r.status != 'deleted'`,
     [req.params.id],
   )
@@ -203,7 +243,11 @@ router.patch('/:id/status', requirePermission('view_reports'), async (req, res) 
     setClauses.push(`closure_notes = $${setParams.length}`)
   }
   if (assignedTo !== undefined) {
-    setParams.push(assignedTo || null)
+    const uuid = assignedTo || null
+    if (uuid && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uuid)) {
+      return res.status(400).json({ error: 'معرف المستخدم غير صالح', code: 'INVALID_USER_ID' })
+    }
+    setParams.push(uuid)
     setClauses.push(`assigned_to = $${setParams.length}::uuid`)
   }
   if (toStatus === 'closed_final') {

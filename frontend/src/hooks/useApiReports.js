@@ -6,12 +6,59 @@ const API = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
 // Maps a numeric priority_level (1–4) to the string key used by UI config
 const PRIORITY_MAP = { 4: 'critical', 3: 'high', 2: 'medium', 1: 'low' }
 
+// Build an absolute URL for a file stored under the uploads directory.
+function uploadUrl(filePath) {
+  if (!filePath) return null
+  const relative = String(filePath).replace(/^uploads[/\\]/, '')
+  return `${API}/uploads/${relative}`
+}
+
 // Normalize a DB report row into the shape expected by map/basket/detail components.
 export function normalizeApiReport(r) {
   const hasCoords = r.gps_lat != null && r.gps_lng != null
   const priority = r.priority_level != null
     ? (PRIORITY_MAP[r.priority_level] ?? 'medium')
     : null
+
+  // ── Build media array ────────────────────────────────────────────────────
+  // Primary source: report_media entries (set for confirmed media candidates)
+  const attachments = Array.isArray(r.media_attachments) ? r.media_attachments : []
+  const beforeMedia = attachments
+    .filter(m => m.phase !== 'after')
+    .map(m => ({ url: uploadUrl(m.file_path), file_type: m.file_type, phase: m.phase }))
+
+  const afterMedia = attachments
+    .filter(m => m.phase === 'after')
+    .map(m => ({ url: uploadUrl(m.file_path), file_type: m.file_type, phase: 'after' }))
+
+  // Fallback: if no report_media yet, surface the candidate's source file (images only)
+  if (beforeMedia.length === 0 && r.candidate_file_path && r.candidate_file_type === 'image') {
+    beforeMedia.push({
+      url: uploadUrl(r.candidate_file_path),
+      file_type: 'image',
+      phase: 'before',
+    })
+  }
+
+  // ── GIS source attributes (raw) ──────────────────────────────────────────
+  const gisAttributes = r.gis_source_attributes
+    ? (typeof r.gis_source_attributes === 'string'
+        ? JSON.parse(r.gis_source_attributes)
+        : r.gis_source_attributes)
+    : null
+
+  // ── GIS mapped operational fields ────────────────────────────────────────
+  const gisMapped = r.gis_mapped_operational
+    ? (typeof r.gis_mapped_operational === 'string'
+        ? JSON.parse(r.gis_mapped_operational)
+        : r.gis_mapped_operational)
+    : null
+
+  const gisOpMeta = r.gis_operational_metadata
+    ? (typeof r.gis_operational_metadata === 'string'
+        ? JSON.parse(r.gis_operational_metadata)
+        : r.gis_operational_metadata)
+    : gisMapped
 
   return {
     // identity
@@ -61,6 +108,30 @@ export function normalizeApiReport(r) {
     // content
     description:   r.description   || '',
     notes:         r.closure_notes || '',
+
+    // ── media (images/video attached to this report) ─────────────────────
+    media:         beforeMedia,
+    afterPhotos:   afterMedia,
+
+    // ── GIS provenance ────────────────────────────────────────────────────
+    gisSourceAttributes:    gisAttributes,
+    gisElementType:         r.gis_element_type  || null,
+    gisDescription:         r.gis_description   || null,
+    gisGeometry:            r.gis_geometry_geojson || null,
+    gisMappedOperational:   gisMapped,
+
+    // ── GIS operational enterprise fields ─────────────────────────────────
+    gisExternalId:          r.gis_external_id      || gisMapped?.externalId      || null,
+    gisContractor:          r.gis_contractor        || gisMapped?.contractor       || null,
+    gisAgency:              r.gis_agency            || gisMapped?.agency           || null,
+    gisSeverity:            r.gis_severity          || gisMapped?.severity         || null,
+    gisViolationType:       r.gis_violation_type    || gisMapped?.violationType    || null,
+    gisObservationDate:     r.gis_observation_date  || gisMapped?.observationDate  || null,
+    gisNotes:               r.gis_notes             || gisMapped?.remarks          || null,
+    gisOperationalMetadata: gisOpMeta,
+
+    // ── Capture timestamp (from candidate media) ──────────────────────────
+    captureTimestamp: r.candidate_capture_timestamp || null,
 
     // timestamps
     createdAt:     r.created_at,

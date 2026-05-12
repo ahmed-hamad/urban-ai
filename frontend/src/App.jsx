@@ -17,6 +17,7 @@ import ReportNew from './pages/ReportNew'
 import Entities from './pages/Entities'
 import IngestionQueue from './pages/IngestionQueue'
 import GISImport from './pages/GISImport'
+import GISIntakeQueue from './pages/GISIntakeQueue'
 
 // Route-level RBAC guard — redirects to dashboard if role not authorized
 function RequireRole({ roles, children }) {
@@ -70,6 +71,11 @@ export default function App() {
               <Route path="/gis-import" element={
                 <RequireRole roles={['admin', 'executive', 'manager']}>
                   <GISImport />
+                </RequireRole>
+              } />
+              <Route path="/gis-intake" element={
+                <RequireRole roles={['admin', 'executive', 'manager']}>
+                  <GISIntakeQueue />
                 </RequireRole>
               } />
             </Route>

@@ -80,7 +80,7 @@ function NoTokenBanner() {
         <h3 className="text-sm font-bold text-amber-800 dark:text-amber-200">لم يتم التحقق من الهوية</h3>
       </div>
       <p className="text-xs text-amber-700 dark:text-amber-300">
-        طبقة الاستيعاب تتطلب تسجيل دخول موثقاً عبر خادم الـ API. <br />
+        منصة إنشاء البلاغات من الوسائط تتطلب تسجيل دخول موثقاً عبر خادم الـ API. <br />
         يرجى تشغيل سكريبت الـ seed ثم تسجيل الدخول بأحد الحسابات التجريبية:
       </p>
       <code className="block text-xs bg-amber-100 dark:bg-amber-900/40 rounded-lg px-3 py-2 text-amber-900 dark:text-amber-200 font-mono leading-relaxed">
@@ -270,21 +270,36 @@ function RejectModal({ onReject, onClose }) {
 
 // ─── Candidate card ───────────────────────────────────────────────────────────
 
+// Strip the leading 'uploads/' prefix before joining with API origin
+function buildUploadUrl(filePath) {
+  if (!filePath) return null
+  const relative = filePath.replace(/^uploads[/\\]/, '')
+  return `${API}/uploads/${relative}`
+}
+
 function CandidateCard({ c, isPending, onConfirm, onReject }) {
   const src    = SOURCE_META[c.detection_source] ?? SOURCE_META.manual
   const hasGPS = c.gps_lat != null && c.gps_lng != null
+
+  // Prefer thumbnail, fall back to original file for images
+  const previewUrl = c.thumbnail_path
+    ? buildUploadUrl(c.thumbnail_path)
+    : c.file_type === 'image' && c.file_path
+      ? buildUploadUrl(c.file_path)
+      : null
 
   return (
     <div className="bg-white dark:bg-gray-900 rounded-2xl border border-slate-200 dark:border-gray-800 overflow-hidden hover:shadow-md transition-shadow">
       {/* Thumbnail */}
       <div className="h-36 bg-slate-100 dark:bg-gray-800 flex items-center justify-center">
-        {c.thumbnail_path
-          ? <img src={`${API}/uploads/${c.thumbnail_path}`} alt="" className="w-full h-full object-cover" />
-          : <div className="flex flex-col items-center gap-1.5 text-slate-400 dark:text-gray-600">
-              {c.file_type === 'video' ? <Video size={28} /> : <Image size={28} />}
-              <span className="text-xs text-center px-2 truncate max-w-[120px]">{c.file_name}</span>
-            </div>
-        }
+        {previewUrl
+          ? <img src={previewUrl} alt="" className="w-full h-full object-cover"
+              onError={e => { e.currentTarget.style.display = 'none'; e.currentTarget.nextSibling?.removeAttribute('hidden') }} />
+          : null}
+        <div className={`flex flex-col items-center gap-1.5 text-slate-400 dark:text-gray-600 ${previewUrl ? 'hidden' : ''}`}>
+          {c.file_type === 'video' ? <Video size={28} /> : <Image size={28} />}
+          <span className="text-xs text-center px-2 truncate max-w-[120px]">{c.file_name}</span>
+        </div>
       </div>
 
       <div className="p-4 space-y-2.5">
@@ -572,8 +587,8 @@ export default function IngestionQueue() {
             <Inbox size={20} className="text-amber-600 dark:text-amber-400" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-slate-800 dark:text-white">قائمة الاستيعاب</h1>
-            <p className="text-sm text-slate-500 dark:text-gray-400">رفع الوسائط → مراجعة بشرية → بلاغ مسودة</p>
+            <h1 className="text-xl font-bold text-slate-800 dark:text-white">إنشاء بلاغات من الصور والفيديو</h1>
+            <p className="text-sm text-slate-500 dark:text-gray-400">رفع وسائط → تحقق بشري → بلاغ مسودة محكوم</p>
           </div>
         </div>
         <div className="flex items-center gap-2">

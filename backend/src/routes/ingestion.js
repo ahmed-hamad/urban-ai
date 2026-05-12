@@ -269,7 +269,7 @@ router.get('/candidates/:id', requirePermission('view_reports'), async (req, res
 })
 
 // PATCH /api/ingestion/candidates/:id/confirm
-// Human reviews and confirms a candidate → creates a draft report.
+// Human reviews and confirms a candidate → creates a draft report + report_media entry.
 // This is the ONLY path from candidate to report for media-based ingestion.
 router.patch('/candidates/:id/confirm', requirePermission('create_report'), async (req, res) => {
   const { elementType, elementLabel, description, notes } = req.body
@@ -278,8 +278,13 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
   try {
     await client.query('BEGIN')
 
+    // Fetch candidate AND its source media in one query
     const { rows: [candidate] } = await client.query(
-      `SELECT * FROM detection_candidates WHERE id = $1 FOR UPDATE`,
+      `SELECT dc.*, mi.file_path AS mi_file_path, mi.file_type AS mi_file_type,
+              mi.mime_type AS mi_mime_type, mi.capture_timestamp AS mi_capture_timestamp
+       FROM detection_candidates dc
+       JOIN media_ingestions mi ON mi.id = dc.media_ingestion_id
+       WHERE dc.id = $1 FOR UPDATE OF dc`,
       [req.params.id],
     )
     if (!candidate) {
@@ -326,6 +331,19 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
         description, candidateLat, candidateLng, req.user.id,
       ],
     )
+
+    // Persist the source media as a report_media entry (phase=before)
+    if (candidate.mi_file_path) {
+      await client.query(
+        `INSERT INTO report_media
+           (report_id, media_ingestion_id, file_path, file_type, mime_type, phase)
+         VALUES ($1, $2, $3, $4, $5, 'before')`,
+        [
+          report.id, candidate.media_ingestion_id,
+          candidate.mi_file_path, candidate.mi_file_type ?? 'image', candidate.mi_mime_type,
+        ],
+      )
+    }
 
     await client.query(
       `UPDATE detection_candidates SET
@@ -570,7 +588,8 @@ async function runGISValidation(job, file, fieldMapping) {
           `INSERT INTO import_features
              (import_job_id, entity_id, source_feature_id, feature_index, geometry, geometry_type,
               source_attributes, mapped_element_type, mapped_description,
-              mapped_location_name, mapped_district, is_valid_geometry, geometry_error, import_status)
+              mapped_location_name, mapped_district, is_valid_geometry, geometry_error,
+              mapped_operational, import_status)
            VALUES ($1,$2,$3,$4,
              CASE
                WHEN $5::text IS NOT NULL
@@ -580,12 +599,13 @@ async function runGISValidation(job, file, fieldMapping) {
                )
                ELSE NULL
              END,
-             $6,$7,$8,$9,$10,$11,$12,$13,
+             $6,$7,$8,$9,$10,$11,$12,$13,$14,
              CASE WHEN $12 THEN 'validated' ELSE 'rejected' END)`,
           [
             job.id, job.entity_id, f.sourceFeatureId, f.featureIndex, geomJson, f.geometryType,
             JSON.stringify(f.sourceAttributes), f.mappedElementType, f.mappedDescription,
             f.mappedLocationName, f.mappedDistrict, f.isValidGeometry, f.geometryError,
+            JSON.stringify(f.mappedOperational ?? {}),
           ],
         )
       }
@@ -711,13 +731,311 @@ router.get('/gis/jobs/:id/features', requirePermission('view_reports'), async (r
 
 // PATCH /api/ingestion/gis/features/:id/reject
 router.patch('/gis/features/:id/reject', requirePermission('create_report'), async (req, res) => {
+  const { reason } = req.body ?? {}
   const { rows } = await query(
     `UPDATE import_features SET import_status='rejected', updated_at=NOW()
-     WHERE id=$1 AND import_status='validated' RETURNING id`,
+     WHERE id=$1 AND import_status='validated' RETURNING id, import_job_id, entity_id`,
     [req.params.id],
   )
   if (!rows.length) return res.status(404).json({ error: 'Feature not found or cannot be rejected' })
+  await audit('import_feature', req.params.id, 'gis_feature_rejected', req.user, { reason })
   res.json({ success: true })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GIS INTAKE QUEUE — per-feature human review before report creation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/ingestion/gis/intake
+// Returns import_features with status='validated' that have not yet been converted
+// to reports (report_id IS NULL). These are the "GIS candidates" awaiting human review.
+router.get('/gis/intake', requirePermission('view_reports'), async (req, res) => {
+  const scope = buildReportScope(req.user)
+  const { import_job_id, page = 1, limit = 50 } = req.query
+  const offset = (Number(page) - 1) * Number(limit)
+
+  const params = []
+  let sql = `
+    SELECT imf.*,
+           ij.file_name     AS job_file_name,
+           ij.layer_type    AS job_layer_type,
+           ij.field_mapping AS job_field_mapping,
+           ij.created_at    AS job_created_at,
+           u.full_name      AS job_created_by_name,
+           ST_AsGeoJSON(imf.geometry)::json AS geometry_geojson,
+           ST_Y(ST_Centroid(imf.geometry))  AS centroid_lat,
+           ST_X(ST_Centroid(imf.geometry))  AS centroid_lng,
+           COUNT(*) OVER()  AS total_count
+    FROM import_features imf
+    JOIN import_jobs ij ON ij.id = imf.import_job_id
+    JOIN users u        ON u.id  = ij.created_by
+    WHERE imf.import_status = 'validated'
+      AND imf.report_id IS NULL
+      AND ij.layer_type = 'reports'
+  `
+
+  if (scope.type === 'entity') { params.push(scope.entityId); sql += ` AND ij.entity_id = $${params.length}` }
+  if (scope.type === 'user')   { params.push(scope.userId);   sql += ` AND ij.created_by = $${params.length}` }
+  if (import_job_id)           { params.push(import_job_id);  sql += ` AND imf.import_job_id = $${params.length}` }
+
+  params.push(Number(limit), offset)
+  sql += ` ORDER BY ij.created_at DESC, imf.feature_index ASC
+           LIMIT $${params.length - 1} OFFSET $${params.length}`
+
+  const { rows } = await query(sql, params)
+  res.json({
+    features: rows,
+    total: Number(rows[0]?.total_count ?? 0),
+    page: Number(page),
+    limit: Number(limit),
+  })
+})
+
+// POST /api/ingestion/gis/features/:id/confirm
+// Human confirms a single GIS feature → creates one draft report.
+// Mirrors the media candidate confirm flow.
+router.post('/gis/features/:id/confirm', requirePermission('create_report'), async (req, res) => {
+  const { elementType, elementLabel, description, notes } = req.body
+  const client = await getClient()
+
+  try {
+    await client.query('BEGIN')
+
+    const { rows: [feature] } = await client.query(
+      `SELECT imf.*, ij.entity_id AS job_entity_id, ij.layer_type
+       FROM import_features imf
+       JOIN import_jobs ij ON ij.id = imf.import_job_id
+       WHERE imf.id = $1 FOR UPDATE OF imf`,
+      [req.params.id],
+    )
+    if (!feature) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Feature not found' })
+    }
+    if (feature.import_status !== 'validated') {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: 'Feature is not in validated state', status: feature.import_status })
+    }
+    if (feature.report_id) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: 'Feature already has a report' })
+    }
+
+    const scope = buildReportScope(req.user)
+    if (scope.type === 'entity' && feature.job_entity_id !== scope.entityId) {
+      await client.query('ROLLBACK')
+      return res.status(403).json({ error: 'Forbidden', code: 'ENTITY_MISMATCH' })
+    }
+
+    // Compute centroid from PostGIS
+    const { rows: [geo] } = await client.query(
+      `SELECT ST_Y(ST_Centroid(geometry)) AS lat, ST_X(ST_Centroid(geometry)) AS lng
+       FROM import_features WHERE id = $1`,
+      [feature.id],
+    )
+    const latitude  = geo?.lat != null ? String(geo.lat)  : null
+    const longitude = geo?.lng != null ? String(geo.lng) : null
+
+    const mo = feature.mapped_operational || {}
+    const { rows: [report] } = await client.query(
+      `INSERT INTO reports
+         (entity_id, import_feature_id, ingestion_source, element_id, element_label,
+          status, description, location_name, district, gps_lat, gps_lng, created_by,
+          gis_external_id, gis_contractor, gis_agency, gis_severity,
+          gis_violation_type, gis_observation_date, gis_notes, gis_operational_metadata,
+          location)
+       VALUES ($1,$2,'gis_import',$3,$4,'draft',$5,$6,$7,
+               $8::double precision,$9::double precision,$10,
+               $11,$12,$13,$14,$15,$16,$17,$18::jsonb,
+         CASE
+           WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
+           THEN ST_SetSRID(ST_MakePoint($9::double precision,$8::double precision),4326)
+           ELSE NULL
+         END)
+       RETURNING id, location`,
+      [
+        feature.job_entity_id, feature.id,
+        elementType ?? feature.mapped_element_type,
+        elementLabel ?? feature.mapped_element_type,
+        description ?? feature.mapped_description,
+        feature.mapped_location_name, feature.mapped_district,
+        latitude, longitude, req.user.id,
+        mo.externalId || null, mo.contractor || null, mo.agency || null, mo.severity || null,
+        mo.violationType || null, mo.observationDate || null, mo.remarks || null,
+        JSON.stringify(mo),
+      ],
+    )
+
+    await client.query(
+      `UPDATE import_features SET import_status='imported', report_id=$1, updated_at=NOW() WHERE id=$2`,
+      [report.id, feature.id],
+    )
+
+    await audit('import_feature', feature.id, 'gis_feature_confirmed', req.user,
+      { reportId: report.id, elementType: elementType ?? feature.mapped_element_type, notes }, client)
+    await audit('report', report.id, 'created', req.user,
+      { source: 'gis_import', importFeatureId: feature.id, reviewedIndividually: true }, client)
+
+    await client.query('COMMIT')
+    await enrichReportSpatially(report.id, report.location, feature.job_entity_id)
+    res.status(201).json({ success: true, reportId: report.id, report })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    console.error('[ingestion/gis] feature confirm error:', err)
+    res.status(500).json({ error: 'Failed to confirm GIS feature' })
+  } finally {
+    client.release()
+  }
+})
+
+// POST /api/ingestion/gis/features/bulk-confirm
+// Bulk-confirm multiple validated GIS features → creates one report per feature.
+router.post('/gis/features/bulk-confirm', requirePermission('create_report'), async (req, res) => {
+  const { featureIds } = req.body
+  if (!Array.isArray(featureIds) || featureIds.length === 0) {
+    return res.status(400).json({ error: 'featureIds array is required' })
+  }
+
+  const scope = buildReportScope(req.user)
+  const { rows: features } = await query(
+    `SELECT imf.*, ij.entity_id AS job_entity_id
+     FROM import_features imf
+     JOIN import_jobs ij ON ij.id = imf.import_job_id
+     WHERE imf.id = ANY($1::uuid[]) AND imf.import_status = 'validated' AND imf.report_id IS NULL`,
+    [featureIds],
+  )
+
+  let confirmed = 0
+  const errors = []
+
+  for (const feature of features) {
+    if (scope.type === 'entity' && feature.job_entity_id !== scope.entityId) continue
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows: [geo] } = await client.query(
+        `SELECT ST_Y(ST_Centroid(geometry)) AS lat, ST_X(ST_Centroid(geometry)) AS lng
+         FROM import_features WHERE id = $1`, [feature.id],
+      )
+      const lat = geo?.lat != null ? String(geo.lat) : null
+      const lng = geo?.lng != null ? String(geo.lng) : null
+
+      const bmo = feature.mapped_operational || {}
+      const { rows: [report] } = await client.query(
+        `INSERT INTO reports
+           (entity_id, import_feature_id, ingestion_source, element_id, element_label,
+            status, description, location_name, district, gps_lat, gps_lng, created_by,
+            gis_external_id, gis_contractor, gis_agency, gis_severity,
+            gis_violation_type, gis_observation_date, gis_notes, gis_operational_metadata,
+            location)
+         VALUES ($1,$2,'gis_import',$3,$4,'draft',$5,$6,$7,
+                 $8::double precision,$9::double precision,$10,
+                 $11,$12,$13,$14,$15,$16,$17,$18::jsonb,
+           CASE WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
+                THEN ST_SetSRID(ST_MakePoint($9::double precision,$8::double precision),4326)
+                ELSE NULL END)
+         RETURNING id, location`,
+        [feature.job_entity_id, feature.id, feature.mapped_element_type, feature.mapped_element_type,
+         feature.mapped_description, feature.mapped_location_name, feature.mapped_district,
+         lat, lng, req.user.id,
+         bmo.externalId || null, bmo.contractor || null, bmo.agency || null, bmo.severity || null,
+         bmo.violationType || null, bmo.observationDate || null, bmo.remarks || null,
+         JSON.stringify(bmo)],
+      )
+
+      await client.query(
+        `UPDATE import_features SET import_status='imported', report_id=$1, updated_at=NOW() WHERE id=$2`,
+        [report.id, feature.id],
+      )
+      await audit('report', report.id, 'created', req.user,
+        { source: 'gis_import', importFeatureId: feature.id, bulkConfirmed: true }, client)
+
+      await client.query('COMMIT')
+      await enrichReportSpatially(report.id, report.location, feature.job_entity_id)
+      confirmed++
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      errors.push({ featureId: feature.id, error: err.message })
+    } finally {
+      client.release()
+    }
+  }
+
+  await audit('import_feature', randomUUID(), 'gis_bulk_confirmed', req.user,
+    { confirmed, errors: errors.length, total: featureIds.length, featureIds })
+
+  res.json({
+    success: true,
+    confirmed,
+    errorCount: errors.length,
+    errors: errors.slice(0, 10),
+    message: `${confirmed} بلاغ مسودة تم إنشاؤه من مراجعة قائمة GIS.`,
+  })
+})
+
+// POST /api/ingestion/gis/features/bulk-reject
+// Soft-reject multiple validated GIS features (marks as 'rejected', keeps audit trail).
+router.post('/gis/features/bulk-reject', requirePermission('create_report'), async (req, res) => {
+  const { featureIds, reason } = req.body
+  if (!Array.isArray(featureIds) || featureIds.length === 0) {
+    return res.status(400).json({ error: 'featureIds array is required' })
+  }
+
+  const scope = buildReportScope(req.user)
+  const params = [featureIds]
+  let sql = `UPDATE import_features AS imf
+             SET import_status = 'rejected', updated_at = NOW()
+             FROM import_jobs AS ij
+             WHERE imf.import_job_id = ij.id
+               AND imf.id          = ANY($1::uuid[])
+               AND imf.import_status = 'validated'
+               AND imf.report_id   IS NULL`
+
+  if (scope.type === 'entity') { params.push(scope.entityId); sql += ` AND ij.entity_id = $${params.length}::uuid` }
+  if (scope.type === 'user')   { params.push(scope.userId);   sql += ` AND ij.created_by = $${params.length}::uuid` }
+  sql += ' RETURNING imf.id'
+
+  const { rows } = await query(sql, params)
+
+  if (rows.length > 0) {
+    await audit('import_feature', randomUUID(), 'gis_bulk_rejected', req.user,
+      { reason, rejected: rows.length, featureIds: rows.map(r => r.id) })
+  }
+
+  res.json({ success: true, rejected: rows.length })
+})
+
+// POST /api/ingestion/gis/features/bulk-delete
+// Hard-delete multiple GIS intake features before any report has been created.
+// Only removes features where report_id IS NULL (never deletes confirmed features).
+router.post('/gis/features/bulk-delete', requirePermission('create_report'), async (req, res) => {
+  const { featureIds } = req.body
+  if (!Array.isArray(featureIds) || featureIds.length === 0) {
+    return res.status(400).json({ error: 'featureIds array is required' })
+  }
+
+  const scope = buildReportScope(req.user)
+  const params = [featureIds]
+  let sql = `DELETE FROM import_features AS imf
+             USING import_jobs AS ij
+             WHERE imf.import_job_id = ij.id
+               AND imf.id          = ANY($1::uuid[])
+               AND imf.report_id   IS NULL`
+
+  if (scope.type === 'entity') { params.push(scope.entityId); sql += ` AND ij.entity_id = $${params.length}::uuid` }
+  if (scope.type === 'user')   { params.push(scope.userId);   sql += ` AND ij.created_by = $${params.length}::uuid` }
+  sql += ' RETURNING imf.id'
+
+  const { rows } = await query(sql, params)
+
+  if (rows.length > 0) {
+    await audit('import_feature', randomUUID(), 'gis_bulk_deleted', req.user,
+      { deleted: rows.length, featureIds: rows.map(r => r.id) })
+  }
+
+  res.json({ success: true, deleted: rows.length })
 })
 
 // POST /api/ingestion/gis/jobs/:id/import
@@ -950,7 +1268,7 @@ router.delete('/spatial-layers', requirePermission('view_reports'), async (req, 
   await query(`DELETE FROM spatial_layer_features WHERE spatial_layer_id = ANY($1::uuid[])`, [layerIds])
   await query(`DELETE FROM spatial_layers WHERE id = ANY($1::uuid[])`, [layerIds])
 
-  await audit('spatial_layer', 'bulk', 'deleted', req.user, { count: layerIds.length, ids: layerIds })
+  await audit('spatial_layer', randomUUID(), 'bulk_deleted', req.user, { count: layerIds.length, ids: layerIds })
   res.json({ success: true, deleted: layerIds.length })
 })
 

@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import {
   LayoutDashboard, ClipboardList, MapPin, TrendingUp,
   Users, Shield, ChevronRight, ChevronLeft, FileText, ScanSearch, LogOut, Circle, Network,
-  Inbox, Layers,
+  Inbox, Layers, ListChecks,
 } from 'lucide-react'
 import { useData } from '@/context/DataContext'
 import { useReportScope } from '@/hooks/useReportScope'
@@ -22,8 +22,9 @@ const NAV_ITEMS = [
   { path: '/entities',   label: 'الهيكل التنظيمي',  Icon: Network,         desc: 'إدارة الجهات والوحدات',        allowedRoles: ['admin', 'executive', 'auditor', 'manager'] },
   { path: '/users',      label: 'المستخدمون',       Icon: Users,           desc: 'إدارة الفريق',                 allowedRoles: ['admin', 'executive', 'manager'] },
   { path: '/audit',      label: 'سجل التدقيق',      Icon: Shield,          desc: 'تتبع الأنشطة',                 allowedRoles: ['admin', 'executive', 'auditor', 'manager', 'monitor'] },
-  { path: '/ingestion',  label: 'قائمة الاستيعاب',  Icon: Inbox,           desc: 'مراجعة مرشحات الكشف',          allowedRoles: ['admin', 'executive', 'manager', 'monitor'] },
+  { path: '/ingestion',  label: 'بلاغات من الوسائط', Icon: Inbox,           desc: 'رفع صور وفيديو → مراجعة → بلاغ', allowedRoles: ['admin', 'executive', 'manager', 'monitor'] },
   { path: '/gis-import', label: 'استيراد GIS',       Icon: Layers,          desc: 'Shapefile · GeoJSON → بلاغات', allowedRoles: ['admin', 'executive', 'manager'] },
+  { path: '/gis-intake', label: 'مراجعة عناصر GIS',  Icon: ListChecks,      desc: 'قائمة المراجعة → تأكيد → بلاغ', allowedRoles: ['admin', 'executive', 'manager'] },
 ]
 
 export default function Sidebar({ collapsed, onToggle }) {

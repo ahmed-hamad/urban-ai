@@ -785,6 +785,80 @@ export default function ReportDetail() {
               </div>
             )}
 
+            {/* GIS Operational Fields — shown for gis_import reports with enterprise mapping */}
+            {report.ingestion_source === 'gis_import' && (
+              report.gisExternalId || report.gisContractor || report.gisAgency ||
+              report.gisSeverity || report.gisViolationType || report.gisObservationDate || report.gisNotes
+            ) && (
+              <div className={`${card} p-4 space-y-3`}>
+                <p className="text-xs font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wide flex items-center gap-1.5">
+                  <MapPin size={12} className="text-indigo-500" />
+                  {'البيانات التشغيلية المستوردة من GIS'}
+                </p>
+                <div className="space-y-1.5">
+                  {[
+                    { label: 'المعرف الخارجي',    value: report.gisExternalId },
+                    { label: 'المقاول',            value: report.gisContractor },
+                    { label: 'الجهة المسؤولة',    value: report.gisAgency },
+                    { label: 'الخطورة',            value: report.gisSeverity },
+                    { label: 'نوع المخالفة',       value: report.gisViolationType },
+                    { label: 'تاريخ الرصد',        value: report.gisObservationDate },
+                    { label: 'ملاحظات GIS',        value: report.gisNotes },
+                  ].filter(row => row.value).map(({ label, value }) => (
+                    <div key={label} className="flex justify-between text-xs gap-3">
+                      <span className="text-slate-500 dark:text-gray-500 flex-shrink-0">{label}</span>
+                      <span className="text-slate-700 dark:text-gray-200 text-right break-all">{value}</span>
+                    </div>
+                  ))}
+                </div>
+                {/* Remaining mapped fields from operational metadata */}
+                {report.gisOperationalMetadata && Object.keys(report.gisOperationalMetadata).filter(k =>
+                  !['externalId','contractor','agency','severity','violationType','observationDate','remarks',
+                    'elementType','description','locationName','district'].includes(k) &&
+                  report.gisOperationalMetadata[k]
+                ).length > 0 && (
+                  <details className="text-xs">
+                    <summary className="text-slate-400 dark:text-gray-500 cursor-pointer hover:text-slate-600 dark:hover:text-gray-300">
+                      {'حقول إضافية مستوردة'}
+                    </summary>
+                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 pt-2 border-t border-slate-100 dark:border-gray-800">
+                      {Object.entries(report.gisOperationalMetadata)
+                        .filter(([k, v]) =>
+                          !['externalId','contractor','agency','severity','violationType','observationDate','remarks',
+                            'elementType','description','locationName','district'].includes(k) && v
+                        )
+                        .map(([k, v]) => (
+                          <div key={k} className="flex flex-col">
+                            <span className="text-slate-400 dark:text-gray-500 font-mono">{k}</span>
+                            <span className="text-slate-700 dark:text-gray-200 break-all">{String(v)}</span>
+                          </div>
+                        ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
+
+            {/* GIS Source Attributes — raw original properties from GIS file */}
+            {report.gisSourceAttributes && Object.keys(report.gisSourceAttributes).length > 0 && (
+              <div className={`${card} p-4 space-y-3`}>
+                <p className="text-xs font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wide flex items-center gap-1.5">
+                  <MapPin size={12} className="text-teal-500" />
+                  {'بيانات المصدر الجغرافي الأصلية'}
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 max-h-60 overflow-y-auto">
+                  {Object.entries(report.gisSourceAttributes).map(([k, v]) => (
+                    v != null && String(v).trim() !== '' && (
+                      <div key={k} className="flex flex-col">
+                        <span className="text-xs text-slate-400 dark:text-gray-500 font-mono">{k}</span>
+                        <span className="text-xs text-slate-700 dark:text-gray-200 break-all">{String(v)}</span>
+                      </div>
+                    )
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Media: before + after */}
             {(report.media?.length > 0 || report.afterPhotos?.length > 0) && (
               <div className={`${card} p-4 space-y-4`}>
@@ -934,6 +1008,9 @@ export default function ReportDetail() {
                 { label: 'المصدر', value: { ai: 'ذكاء اصطناعي', manual: 'يدوي', mobile: 'جوّال', drone: 'طائرة', gis_import: 'استيراد GIS', media_upload: 'رفع وسائط' }[report.source || report.ingestion_source] || 'يدوي' },
                 { label: 'الإنشاء', value: report.createdAt ? new Date(report.createdAt).toLocaleDateString('ar-SA') : '—' },
                 { label: 'آخر تحديث', value: report.updatedAt ? new Date(report.updatedAt).toLocaleDateString('ar-SA') : '—' },
+                ...(report.captureTimestamp ? [{ label: 'وقت التقاط الوسائط', value: new Date(report.captureTimestamp).toLocaleString('ar-SA') }] : []),
+                ...(report.slaHours ? [{ label: 'SLA', value: `${report.slaHours} ساعة` }] : []),
+                ...(report.neighborhood ? [{ label: 'الحي', value: report.neighborhood }] : []),
               ].map(({ label, value }) => (
                 <div key={label} className="flex justify-between text-xs">
                   <span className="text-slate-500 dark:text-gray-500">{label}</span>
