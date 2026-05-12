@@ -609,8 +609,8 @@ export default function ReportsBasket() {
   const { scopedReports, isRestricted, scopeLabel } = useReportScope()
   const [searchParams] = useSearchParams()
 
-  const isAdmin = user?.role === 'admin' || user?.isSystemAdmin
-  const isManager = user?.role === 'manager' && !isAdmin
+  const isAdmin = user?.role === 'admin'
+  const isManager = user?.role === 'manager'
 
   const [search, setSearch] = useState('')
   const [filterEl, setFilterEl] = useState('all')

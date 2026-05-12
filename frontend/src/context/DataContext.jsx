@@ -1,7 +1,8 @@
-import { createContext, useContext, useState, useEffect } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { regulationData } from '@/data/mockData'
 import { normalizeStatus, OPEN_STATUSES } from '@/data/caseConfig'
 import { ROLE_DEFAULT_PERMISSIONS } from '@/data/permissions'
+import { useAuth } from '@/context/AuthContext'
 
 const DataContext = createContext(null)
 
@@ -12,37 +13,21 @@ function load(key, def) {
   } catch { return def }
 }
 
-// ── System admin seed ─────────────────────────────────────────────────────────
-const SYSTEM_ADMIN = {
-  id: 'USR-ADMIN-001',
-  name: 'مدير النظام',
-  email: 'admin@albaha.gov.sa',
-  password: 'admin@2024',
-  role: 'admin',
-  entity: 'الإدارة العليا',
-  entityId: null,
-  dept: 'الإدارة العليا',
-  branch: '',
-  phone: '0171234567',
-  avatar: 'مد',
-  status: 'active',
-  isSystemAdmin: true,
-  permissions: ROLE_DEFAULT_PERMISSIONS.admin,
-  joinDate: '2024-01-01',
-  createdAt: '2024-01-01T00:00:00.000Z',
-}
-
-const USER_DATA_VERSION = 'v2'
-
-function loadUsers() {
-  // Version migration: clears old format users, keeps only admin seed
-  if (localStorage.getItem('ua_users_version') !== USER_DATA_VERSION) {
-    localStorage.removeItem('ua_users')
-    localStorage.setItem('ua_users_version', USER_DATA_VERSION)
-    return [SYSTEM_ADMIN]
+function normalizeApiUser(u) {
+  return {
+    id:          u.id,
+    name:        u.name || u.full_name || '',
+    email:       u.email,
+    role:        u.role,
+    entity:      u.entity_name || '',
+    entityId:    u.entity_id || null,
+    avatar:      u.avatar || (u.name || '').slice(0, 2) || 'م',
+    status:      u.status,
+    permissions: u.permissions || [],
+    joinDate:    u.join_date,
+    createdAt:   u.created_at,
+    phone:       u.phone || '',
   }
-  const stored = load('ua_users', [])
-  return stored.some(u => u.id === SYSTEM_ADMIN.id) ? stored : [SYSTEM_ADMIN, ...stored]
 }
 
 // Migrate old reports: normalize status + fill missing fields added after initial release
@@ -87,8 +72,10 @@ const DEFAULT_CONTRACTORS = [
 ]
 
 export function DataProvider({ children }) {
+  const { user: authUser, authFetch } = useAuth()
   const [reports, setReports] = useState(() => migrateReports(load('ua_reports', [])))
-  const [users, setUsers] = useState(() => loadUsers())
+  const [users, setUsers] = useState([])
+  const [usersLoading, setUsersLoading] = useState(false)
   const [entities, setEntities] = useState(() => load('ua_entities', []))
   const [auditLogs, setAuditLogs] = useState(() => load('ua_audit_logs', []))
   const [restoreRequests, setRestoreRequests] = useState(() => load('ua_restore_requests', []))
@@ -113,7 +100,16 @@ export function DataProvider({ children }) {
       } catch { /* storage full even without media — skip, state stays in memory */ }
     }
   }, [reports])
-  useEffect(() => { try { localStorage.setItem('ua_users', JSON.stringify(users)) } catch {} }, [users])
+  // Fetch users from API whenever auth token changes
+  useEffect(() => {
+    if (!authUser?.token) { setUsers([]); return }
+    setUsersLoading(true)
+    authFetch('/api/users')
+      .then(res => res?.json())
+      .then(data => { if (data?.users) setUsers(data.users.map(normalizeApiUser)) })
+      .catch(() => {})
+      .finally(() => setUsersLoading(false))
+  }, [authUser?.token, authFetch])
   useEffect(() => { try { localStorage.setItem('ua_entities', JSON.stringify(entities)) } catch {} }, [entities])
   useEffect(() => { try { localStorage.setItem('ua_audit_logs', JSON.stringify(auditLogs)) } catch {} }, [auditLogs])
   useEffect(() => { try { localStorage.setItem('ua_restore_requests', JSON.stringify(restoreRequests)) } catch {} }, [restoreRequests])
@@ -378,102 +374,87 @@ export function DataProvider({ children }) {
   }
 
   // ── Password reset ──────────────────────────────────────────────────────────
-  const resetPassword = (userId, newPassword, actor) => {
-    const target = users.find(u => u.id === userId)
-    if (!target) return { error: 'المستخدم غير موجود' }
-    if (target.isSystemAdmin && !actor?.isSystemAdmin) return { error: 'غير مصرح بإعادة تعيين كلمة مرور مدير النظام العام' }
-    if (!actor?.isSystemAdmin) {
-      const actorEntity = (actor?.entity || actor?.dept || '').trim()
-      const targetEntity = (target.entity || '').trim()
-      if (actorEntity && actorEntity !== targetEntity) return { error: 'المستخدم خارج نطاق صلاحياتك التنظيمية' }
-    }
-    if (newPassword.length < 6) return { error: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' }
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, password: newPassword } : u))
-    addAuditLog({
-      action: 'password_reset',
-      userId: actor?.id || 'system',
-      userName: actor?.name || 'النظام',
-      entity: actor?.entity || '',
-      details: `إعادة تعيين كلمة مرور: ${target.name} (${target.email})`,
-      targetUserId: target.id,
-      targetUserName: target.name,
+  const resetPassword = async (userId, newPassword) => {
+    if (!newPassword || newPassword.length < 6) return { error: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' }
+    const res = await authFetch(`/api/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ password: newPassword }),
     })
+    if (!res) return { error: 'انتهت الجلسة، أعد تسجيل الدخول' }
+    if (!res.ok) {
+      const err = await res.json()
+      return { error: err.error || 'فشل تغيير كلمة المرور' }
+    }
     return { success: true }
   }
 
   // ── Users ──────────────────────────────────────────────────────────────────
-  const addUser = (data, actor) => {
-    const user = {
-      id: `USR-${Date.now()}`,
-      name: data.name,
-      email: data.email,
-      phone: data.phone,
-      password: data.password || '',
-      role: data.role || 'monitor',
-      entity: data.entityName || data.entity || '',
-      entityId: data.entityId || null,
-      dept: data.entityName || data.entity || '',
-      branch: data.branch || '',
-      avatar: data.name.slice(0, 2),
-      status: 'active',
-      isSystemAdmin: false,
-      permissions: data.permissions || ROLE_DEFAULT_PERMISSIONS[data.role] || [],
-      joinDate: new Date().toISOString().slice(0, 10),
-      createdAt: new Date().toISOString(),
-    }
-    setUsers(prev => [...prev, user])
-    addAuditLog({
-      action: 'user_created',
-      userId: actor?.id || 'system',
-      userName: actor?.name || 'النظام',
-      entity: actor?.entity || '',
-      details: `إنشاء مستخدم: ${user.name} — الدور: ${user.role} — الجهة: ${user.entity || '—'}`,
-      targetUserId: user.id,
-      targetUserName: user.name,
+  const addUser = async (data) => {
+    const res = await authFetch('/api/users', {
+      method: 'POST',
+      body: JSON.stringify({
+        name:        data.name,
+        email:       data.email,
+        role:        data.role,
+        entityId:    data.entityId || null,
+        password:    data.password,
+        permissions: data.permissions,
+        phone:       data.phone || '',
+      }),
     })
-    return user
+    if (!res) return { error: 'انتهت الجلسة، أعد تسجيل الدخول' }
+    if (!res.ok) {
+      const err = await res.json()
+      return { error: err.error || 'فشل إنشاء المستخدم' }
+    }
+    const { user: newUser } = await res.json()
+    setUsers(prev => [...prev, normalizeApiUser(newUser)])
+    return { success: true, user: normalizeApiUser(newUser) }
   }
 
-  const updateUser = (id, patch, actor) => {
-    const target = users.find(u => u.id === id)
-    setUsers(prev => prev.map(u => u.id === id ? { ...u, ...patch } : u))
-    if (actor && target) {
-      addAuditLog({
-        action: 'user_updated',
-        userId: actor.id,
-        userName: actor.name,
-        entity: actor.entity || '',
-        details: `تعديل بيانات المستخدم: ${target.name}`,
-        targetUserId: target.id,
-        targetUserName: target.name,
-        previousValues: JSON.stringify(Object.keys(patch).reduce((acc, k) => ({ ...acc, [k]: target[k] }), {})),
-        newValues: JSON.stringify(patch),
-      })
+  const updateUser = async (id, patch) => {
+    const res = await authFetch(`/api/users/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name:        patch.name,
+        role:        patch.role,
+        entityId:    patch.entityId !== undefined ? patch.entityId : undefined,
+        status:      patch.status,
+        phone:       patch.phone,
+        permissions: patch.permissions,
+        password:    patch.password,
+      }),
+    })
+    if (!res) return { error: 'انتهت الجلسة، أعد تسجيل الدخول' }
+    if (!res.ok) {
+      const err = await res.json()
+      return { error: err.error || 'فشل تعديل المستخدم' }
     }
+    const { user: updated } = await res.json()
+    setUsers(prev => prev.map(u => u.id === id ? { ...u, ...normalizeApiUser(updated) } : u))
+    return { success: true }
   }
 
-  // Soft delete only — protected accounts are never removed from storage
-  const deleteUser = (id, actor) => {
-    const target = users.find(u => u.id === id)
-    if (!target || target.isSystemAdmin) return false
-    const now = new Date().toISOString()
-    setUsers(prev => prev.map(u =>
-      u.id === id
-        ? { ...u, status: 'inactive', deletedAt: now, deletedBy: actor?.id || 'system' }
-        : u
-    ))
-    addAuditLog({
-      action: 'user_deactivated',
-      userId: actor?.id || 'system',
-      userName: actor?.name || 'النظام',
-      entity: actor?.entity || '',
-      details: `تعطيل حساب: ${target.name} — الدور: ${target.role} — الجهة: ${target.entity || '—'}`,
-      targetUserId: target.id,
-      targetUserName: target.name,
-      previousValues: JSON.stringify({ status: target.status }),
-      newValues: JSON.stringify({ status: 'inactive' }),
-    })
-    return true
+  const deleteUser = async (id) => {
+    const res = await authFetch(`/api/users/${id}`, { method: 'DELETE' })
+    if (!res) return { error: 'انتهت الجلسة، أعد تسجيل الدخول' }
+    if (!res.ok) {
+      const err = await res.json()
+      return { error: err.error || 'فشل تعطيل المستخدم' }
+    }
+    setUsers(prev => prev.map(u => u.id === id ? { ...u, status: 'inactive' } : u))
+    return { success: true }
+  }
+
+  const reactivateUser = async (id) => {
+    const res = await authFetch(`/api/users/${id}/reactivate`, { method: 'PATCH' })
+    if (!res) return { error: 'انتهت الجلسة، أعد تسجيل الدخول' }
+    if (!res.ok) {
+      const err = await res.json()
+      return { error: err.error || 'فشل تفعيل المستخدم' }
+    }
+    setUsers(prev => prev.map(u => u.id === id ? { ...u, status: 'active' } : u))
+    return { success: true }
   }
 
   // ── Entities ───────────────────────────────────────────────────────────────
@@ -573,13 +554,13 @@ export function DataProvider({ children }) {
 
   return (
     <DataContext.Provider value={{
-      reports, users, entities, auditLogs, stats,
+      reports, users, usersLoading, entities, auditLogs, stats,
       addReport, updateReport, deleteReport, restoreReport, addAuditLog,
       restoreRequests, requestRestore, approveRestoreRequest, rejectRestoreRequest,
       contractors, addContractor, updateContractor, deleteContractor,
       updateEnforcementStatus,
       resetPassword,
-      addUser, updateUser, deleteUser,
+      addUser, updateUser, deleteUser, reactivateUser,
       addEntity, updateEntity, deleteEntity,
       getDefaultEntity,
     }}>
@@ -593,5 +574,3 @@ export const useData = () => {
   if (!ctx) throw new Error('useData must be used within DataProvider')
   return ctx
 }
-
-export { SYSTEM_ADMIN }

@@ -3,6 +3,19 @@ import bcrypt from 'bcryptjs'
 import { requirePermission } from '../middleware/auth.js'
 import { query } from '../services/db.js'
 
+const ROLE_DEFAULT_PERMISSIONS = {
+  admin:     ['create_report', 'view_reports', 'edit_report', 'assign_report',
+              'close_inspector', 'quality_review', 'close_final', 'reject_report',
+              'manage_users', 'manage_entities', 'reset_password',
+              'view_financials', 'view_audit_log', 'gis_access', 'ai_access'],
+  executive: ['view_reports', 'assign_report', 'reject_report',
+              'manage_users', 'manage_entities', 'view_financials', 'view_audit_log', 'gis_access'],
+  manager:   ['create_report', 'view_reports', 'edit_report', 'assign_report',
+              'view_financials', 'view_audit_log', 'gis_access', 'reset_password'],
+  auditor:   ['view_reports', 'quality_review', 'close_final', 'reject_report', 'view_audit_log'],
+  monitor:   ['create_report', 'view_reports', 'close_inspector', 'gis_access', 'ai_access'],
+}
+
 async function audit(subjectType, subjectId, action, actor, meta = {}) {
   await query(
     `INSERT INTO audit_logs (subject_type, subject_id, action, performed_by, entity_id, metadata)
@@ -15,8 +28,8 @@ const router = Router()
 
 const USER_SELECT = `
   SELECT u.id, u.full_name AS name, u.email, u.role, u.status,
-         u.entity_id, u.avatar, u.join_date, u.permissions,
-         u.created_at, e.name AS entity_name
+         u.entity_id, u.avatar, u.join_date, u.created_at,
+         u.permissions, u.phone, e.name AS entity_name
   FROM users u
   LEFT JOIN entities e ON e.id = u.entity_id`
 
@@ -38,6 +51,15 @@ router.get('/', requirePermission('view_reports'), async (req, res) => {
   res.json({ users: rows })
 })
 
+// GET /api/users/entities — returns all active entities (for admin entity selector)
+// MUST be defined before /:id to avoid "entities" being treated as a user ID
+router.get('/entities', requirePermission('manage_entities'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT id, name, type, code FROM entities WHERE is_active = true ORDER BY name ASC`,
+  )
+  res.json({ entities: rows })
+})
+
 // GET /api/users/:id
 router.get('/:id', requirePermission('view_reports'), async (req, res) => {
   const { role: actorRole, entityId, id: actorId } = req.user
@@ -50,17 +72,12 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
   const { rows } = await query(`${USER_SELECT} WHERE u.id = $1`, [targetId])
   if (!rows.length) return res.status(404).json({ error: 'User not found' })
 
-  const user = rows[0]
-  if (actorRole === 'manager' && user.entity_id !== (entityId || actorId)) {
-    // managers may only view users in their own entity
-  }
-
-  res.json({ user })
+  res.json({ user: rows[0] })
 })
 
 // POST /api/users — requires manage_users permission
 router.post('/', requirePermission('manage_users'), async (req, res) => {
-  const { name, email, role, entityId, password } = req.body
+  const { name, email, role, entityId, password, permissions, phone } = req.body
   const actorRole = req.user.role
 
   if (!name || !email || !role || !password) {
@@ -75,15 +92,19 @@ router.post('/', requirePermission('manage_users'), async (req, res) => {
     return res.status(400).json({ error: 'الجهة التنظيمية إلزامية لهذا الدور', code: 'ENTITY_REQUIRED' })
   }
 
+  const finalPerms = Array.isArray(permissions) && permissions.length > 0
+    ? permissions
+    : (ROLE_DEFAULT_PERMISSIONS[role] || [])
+
   const hash = await bcrypt.hash(password, 12)
-  const avatar = name.trim()[0] ?? 'م'
+  const avatar = name.trim().slice(0, 2)
 
   try {
     const { rows: [user] } = await query(
-      `INSERT INTO users (full_name, email, role, entity_id, password_hash, avatar)
-       VALUES ($1, $2, $3, $4::uuid, $5, $6)
-       RETURNING id, full_name AS name, email, role, entity_id, status, avatar, join_date`,
-      [name.trim(), email.toLowerCase().trim(), role, entityId || null, hash, avatar],
+      `INSERT INTO users (full_name, email, role, entity_id, password_hash, avatar, permissions, phone)
+       VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8)
+       RETURNING id, full_name AS name, email, role, entity_id, status, avatar, join_date, permissions, phone`,
+      [name.trim(), email.toLowerCase().trim(), role, entityId || null, hash, avatar, finalPerms, phone || null],
     )
 
     await audit('user', user.id, 'created', req.user, { role, entityId })
@@ -100,7 +121,7 @@ router.post('/', requirePermission('manage_users'), async (req, res) => {
 router.patch('/:id', requirePermission('manage_users'), async (req, res) => {
   const { role: actorRole, id: actorId } = req.user
   const targetId = req.params.id
-  const { role: newRole, entityId, status, name, password } = req.body
+  const { role: newRole, entityId, status, name, password, permissions, phone } = req.body
 
   if (actorRole !== 'admin' && newRole && ['admin', 'executive'].includes(newRole)) {
     return res.status(403).json({ error: 'Forbidden', code: 'PRIVILEGE_ESCALATION' })
@@ -109,10 +130,15 @@ router.patch('/:id', requirePermission('manage_users'), async (req, res) => {
   const setClauses = ['updated_at = NOW()']
   const params = []
 
-  if (name) { params.push(name.trim()); setClauses.push(`full_name = $${params.length}`) }
-  if (newRole) { params.push(newRole); setClauses.push(`role = $${params.length}`) }
-  if (entityId !== undefined) { params.push(entityId || null); setClauses.push(`entity_id = $${params.length}::uuid`) }
-  if (status) { params.push(status); setClauses.push(`status = $${params.length}`) }
+  if (name)                     { params.push(name.trim());   setClauses.push(`full_name = $${params.length}`) }
+  if (newRole)                  { params.push(newRole);       setClauses.push(`role = $${params.length}`) }
+  if (entityId !== undefined)   { params.push(entityId || null); setClauses.push(`entity_id = $${params.length}::uuid`) }
+  if (status)                   { params.push(status);        setClauses.push(`status = $${params.length}`) }
+  if (phone !== undefined)      { params.push(phone || null); setClauses.push(`phone = $${params.length}`) }
+  if (Array.isArray(permissions)) {
+    params.push(permissions)
+    setClauses.push(`permissions = $${params.length}`)
+  }
   if (password) {
     const hash = await bcrypt.hash(password, 12)
     params.push(hash); setClauses.push(`password_hash = $${params.length}`)
@@ -122,7 +148,8 @@ router.patch('/:id', requirePermission('manage_users'), async (req, res) => {
 
   params.push(targetId)
   const { rows } = await query(
-    `UPDATE users SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING id, full_name AS name, email, role, entity_id, status`,
+    `UPDATE users SET ${setClauses.join(', ')} WHERE id = $${params.length}
+     RETURNING id, full_name AS name, email, role, entity_id, status, avatar, permissions, phone`,
     params,
   )
 
@@ -151,6 +178,22 @@ router.delete('/:id', requirePermission('manage_users'), async (req, res) => {
 
   await audit('user', targetId, 'deactivated', req.user, {})
   res.json({ success: true, deactivated: targetId })
+})
+
+// PATCH /api/users/:id/reactivate
+router.patch('/:id/reactivate', requirePermission('manage_users'), async (req, res) => {
+  const targetId = req.params.id
+
+  const { rows } = await query(
+    `UPDATE users SET status = 'active', updated_at = NOW()
+     WHERE id = $1 AND status = 'inactive' RETURNING id`,
+    [targetId],
+  )
+
+  if (!rows.length) return res.status(404).json({ error: 'User not found or already active' })
+
+  await audit('user', targetId, 'reactivated', req.user, {})
+  res.json({ success: true, reactivated: targetId })
 })
 
 export default router

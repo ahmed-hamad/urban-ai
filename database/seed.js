@@ -5,10 +5,12 @@
  * Inserts baseline entities and users required for operational testing.
  * Passwords are hashed with bcrypt (10 rounds).
  *
- * Test credentials:
- *   admin@urban-ai.sa     / Admin@1234
- *   manager@urban-ai.sa   / Manager@1234
- *   monitor@urban-ai.sa   / Monitor@1234
+ * Credentials:
+ *   admin@urban-ai.sa      / Admin@1234      (مدير النظام — system)
+ *   admin@albaha.gov.sa    / admin@2024      (مدير النظام — albaha)
+ *   admin1@baha.com        / Admin@1234      (أحمد حمد — admin)
+ *   manager@urban-ai.sa    / Manager@1234    (مدير إدارة)
+ *   monitor@urban-ai.sa    / Monitor@1234    (مراقب ميداني)
  */
 
 import dotenv from 'dotenv'
@@ -18,6 +20,13 @@ import bcrypt from 'bcryptjs'
 
 const { Pool } = pg
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+
+const ALL_PERMISSIONS = [
+  'create_report', 'view_reports', 'edit_report', 'assign_report',
+  'close_inspector', 'quality_review', 'close_final', 'reject_report',
+  'manage_users', 'manage_entities', 'reset_password',
+  'view_financials', 'view_audit_log', 'gis_access', 'ai_access',
+]
 
 const ENTITIES = [
   {
@@ -38,35 +47,60 @@ const ENTITIES = [
 
 const USERS = [
   {
-    id:       'b0000000-0000-0000-0000-000000000001',
-    email:    'admin@urban-ai.sa',
-    password: 'Admin@1234',
-    fullName: 'مدير النظام',
-    role:     'admin',
-    entityId: 'a0000000-0000-0000-0000-000000000001',
-    permissions: ['view_reports', 'create_report', 'assign_report', 'close_inspector',
-                  'quality_review', 'close_final', 'reject_report'],
-    avatar: 'من',
+    id:          'b0000000-0000-0000-0000-000000000001',
+    email:       'admin@urban-ai.sa',
+    password:    'Admin@1234',
+    fullName:    'مدير النظام',
+    role:        'admin',
+    entityId:    null,
+    phone:       '',
+    permissions: ALL_PERMISSIONS,
+    avatar:      'من',
   },
   {
-    id:       'b0000000-0000-0000-0000-000000000002',
-    email:    'manager@urban-ai.sa',
-    password: 'Manager@1234',
-    fullName: 'خالد العمري',
-    role:     'manager',
-    entityId: 'a0000000-0000-0000-0000-000000000001',
-    permissions: ['view_reports', 'create_report', 'assign_report', 'reject_report'],
-    avatar: 'خع',
+    id:          'b0000000-0000-0000-0000-000000000010',
+    email:       'admin@albaha.gov.sa',
+    password:    'admin@2024',
+    fullName:    'مدير النظام',
+    role:        'admin',
+    entityId:    null,
+    phone:       '0171234567',
+    permissions: ALL_PERMISSIONS,
+    avatar:      'مد',
   },
   {
-    id:       'b0000000-0000-0000-0000-000000000003',
-    email:    'monitor@urban-ai.sa',
-    password: 'Monitor@1234',
-    fullName: 'أحمد السلمي',
-    role:     'monitor',
-    entityId: 'a0000000-0000-0000-0000-000000000001',
-    permissions: ['view_reports', 'create_report', 'close_inspector'],
-    avatar: 'أس',
+    id:          'b0000000-0000-0000-0000-000000000011',
+    email:       'admin1@baha.com',
+    password:    'Admin@1234',
+    fullName:    'أحمد حمد',
+    role:        'admin',
+    entityId:    null,
+    phone:       '',
+    permissions: ALL_PERMISSIONS,
+    avatar:      'أح',
+  },
+  {
+    id:          'b0000000-0000-0000-0000-000000000002',
+    email:       'manager@urban-ai.sa',
+    password:    'Manager@1234',
+    fullName:    'خالد العمري',
+    role:        'manager',
+    entityId:    'a0000000-0000-0000-0000-000000000001',
+    phone:       '',
+    permissions: ['create_report', 'view_reports', 'edit_report', 'assign_report',
+                  'view_financials', 'view_audit_log', 'gis_access', 'reset_password'],
+    avatar:      'خع',
+  },
+  {
+    id:          'b0000000-0000-0000-0000-000000000003',
+    email:       'monitor@urban-ai.sa',
+    password:    'Monitor@1234',
+    fullName:    'أحمد السلمي',
+    role:        'monitor',
+    entityId:    'a0000000-0000-0000-0000-000000000001',
+    phone:       '',
+    permissions: ['view_reports', 'create_report', 'close_inspector', 'gis_access', 'ai_access'],
+    avatar:      'أس',
   },
 ]
 
@@ -90,13 +124,18 @@ async function seed() {
     for (const u of USERS) {
       const hash = await bcrypt.hash(u.password, 10)
       await client.query(
-        `INSERT INTO users (id, email, password_hash, full_name, role, entity_id, permissions, avatar)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO users (id, email, password_hash, full_name, role, entity_id, phone, permissions, avatar)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (id) DO UPDATE SET
            password_hash = EXCLUDED.password_hash,
-           role = EXCLUDED.role,
-           entity_id = EXCLUDED.entity_id`,
-        [u.id, u.email, hash, u.fullName, u.role, u.entityId, u.permissions, u.avatar],
+           full_name     = EXCLUDED.full_name,
+           role          = EXCLUDED.role,
+           entity_id     = EXCLUDED.entity_id,
+           phone         = EXCLUDED.phone,
+           permissions   = EXCLUDED.permissions,
+           avatar        = EXCLUDED.avatar,
+           status        = 'active'`,
+        [u.id, u.email, hash, u.fullName, u.role, u.entityId, u.phone, u.permissions, u.avatar],
       )
       console.log(`  ✓ ${u.email} (${u.role}) — password: ${u.password}`)
     }

@@ -8,6 +8,7 @@ import { Bot, FileText, TrendingUp, ChevronRight, ChevronLeft, Send, Layers, Plu
 import { statusConfig } from '@/data/mockData'
 import { OPEN_STATUSES } from '@/data/caseConfig'
 import { useReportScope } from '@/hooks/useReportScope'
+import { useApiReports, normalizeApiReport } from '@/hooks/useApiReports'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 const createIcon = (color) => L.divIcon({
@@ -495,6 +496,17 @@ const PANELS = [
 
 export default function Dashboard() {
   const { scopedReports: reports, isRestricted, scopeLabel } = useReportScope()
+  const { reports: rawApiReports } = useApiReports()
+
+  // Merge local (DataContext) + API-only reports for map — deduplicate by id
+  const allMapReports = useMemo(() => {
+    const localIds = new Set(reports.map(r => r.id))
+    const apiNormalized = rawApiReports
+      .map(normalizeApiReport)
+      .filter(r => !localIds.has(r.id) && r.coords != null)
+    return [...reports, ...apiNormalized]
+  }, [reports, rawApiReports])
+
   const stats = useMemo(() => computeStats(reports), [reports])
   const [panel, setPanel] = useState('reports')
   const [panelOpen, setPanelOpen] = useState(true)
@@ -509,7 +521,7 @@ export default function Dashboard() {
     satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   }
 
-  const filtered = reports.filter(r => filterEl === 'all' || r.element === filterEl)
+  const filtered = allMapReports.filter(r => filterEl === 'all' || r.element === filterEl)
   const usedElements = stats.byElement
 
   return (
@@ -553,7 +565,7 @@ export default function Dashboard() {
         <div className="flex-1 relative">
           <MapContainer center={[20.0131, 41.4677]} zoom={13} style={{ width: '100%', height: '100%' }} zoomControl={false}>
             <TileLayer url={tiles[mapStyle]} attribution="&copy; CartoDB" />
-            {reports.length > 0 && (
+            {allMapReports.length > 0 && (
               <MarkerClusterGroup chunkedLoading maxClusterRadius={55} showCoverageOnHover={false}>
                 {filtered.map(r => (
                   <Marker key={r.id} position={r.coords || [20.0131, 41.4677]}

@@ -6,11 +6,39 @@ import { randomUUID } from 'crypto'
 import { requirePermission, buildReportScope } from '../middleware/auth.js'
 import { query, getClient } from '../services/db.js'
 import { extractMetadata, classifyFileType }   from '../services/ingestion/mediaProcessor.js'
-import { processGeoJSON, processShapefile }    from '../services/ingestion/gisProcessor.js'
+import {
+  processGeoJSON, processShapefile, extractRasterAttributes,
+  buildEffectiveMapping, applyFieldMapping,
+} from '../services/ingestion/gisProcessor.js'
 import { suggestGroups, describeGroup }        from '../services/ingestion/candidateGrouper.js'
 import { enrichReportSpatially } from '../services/spatialGovernance.js'
 
 const router = Router()
+
+// ─── Report number generator ──────────────────────────────────────────────────
+async function nextReportNumber(client) {
+  const fn = client ? client.query.bind(client) : query
+  const { rows: [{ rn }] } = await fn(`SELECT next_report_number() AS rn`)
+  return rn
+}
+
+// Attach raster image URLs from GIS feature attributes as report_media (phase=before).
+async function attachRasterImages(reportId, rasterImages, userId, dbClient) {
+  if (!rasterImages || rasterImages.length === 0) return
+  const fn = dbClient ? dbClient.query.bind(dbClient) : query
+  // rasterImages may arrive as a JSONB string (from DB column) or a JS array
+  const images = Array.isArray(rasterImages)
+    ? rasterImages
+    : (typeof rasterImages === 'string' ? JSON.parse(rasterImages) : [])
+  for (const img of images) {
+    if (!img?.url) continue
+    await fn(
+      `INSERT INTO report_media (report_id, file_path, file_type, mime_type, phase, caption, uploaded_by)
+       VALUES ($1, $2, 'image', 'image/jpeg', 'before', $3, $4::uuid)`,
+      [reportId, img.url, `مرفق GIS: ${img.attrName || 'صورة'}`, userId || null],
+    ).catch(() => {})
+  }
+}
 
 // ─── Upload directories ───────────────────────────────────────────────────────
 
@@ -567,47 +595,69 @@ router.post('/gis/upload', requirePermission('create_report'), gisUpload.single(
   })
 })
 
+// ─── GIS Validation timeout: 10 minutes ──────────────────────────────────────
+const VALIDATION_TIMEOUT_MS = 10 * 60 * 1000
+
 async function runGISValidation(job, file, fieldMapping) {
+  // Hard timeout — marks the job failed if processing exceeds limit.
+  const timeoutHandle = setTimeout(async () => {
+    console.error('[ingestion/gis] timeout for job', job.id)
+    await query(
+      `UPDATE import_jobs SET status='failed',
+         processing_error='تجاوز وقت المعالجة الحد المسموح (10 دقائق) — يُرجى تبسيط الملف أو تقليل عدد العناصر',
+         updated_at=NOW()
+       WHERE id=$1 AND status IN ('validating','importing')`,
+      [job.id],
+    ).catch(() => {})
+  }, VALIDATION_TIMEOUT_MS)
+
   try {
     let result
-    if (job.job_type === 'geojson')   result = await processGeoJSON(file.path, fieldMapping)
+    if (job.job_type === 'geojson')        result = await processGeoJSON(file.path, fieldMapping)
     else if (job.job_type === 'shapefile') result = await processShapefile(file.path, fieldMapping)
     else {
       await query(
         `UPDATE import_jobs SET status='failed', processing_error=$1, updated_at=NOW() WHERE id=$2`,
-        [`${job.job_type} is not yet supported. Use GeoJSON (.geojson) or Shapefile (.shp).`, job.id],
+        [`${job.job_type} غير مدعوم — استخدم GeoJSON أو Shapefile`, job.id],
       )
       return
     }
 
     if (job.layer_type === 'reports') {
-      // Insert to import_features for report creation workflow
-      for (const f of result.features) {
-        const geomJson = (f.isValidGeometry && f.geometry) ? JSON.stringify(f.geometry) : null
-        await query(
-          `INSERT INTO import_features
-             (import_job_id, entity_id, source_feature_id, feature_index, geometry, geometry_type,
-              source_attributes, mapped_element_type, mapped_description,
-              mapped_location_name, mapped_district, is_valid_geometry, geometry_error,
-              mapped_operational, import_status)
-           VALUES ($1,$2,$3,$4,
-             CASE
-               WHEN $5::text IS NOT NULL
-               THEN ST_SetSRID(
-                 ST_Force2D(ST_GeomFromGeoJSON($5::text)),
-                 4326
-               )
-               ELSE NULL
-             END,
-             $6,$7,$8,$9,$10,$11,$12,$13,$14,
-             CASE WHEN $12 THEN 'validated' ELSE 'rejected' END)`,
-          [
-            job.id, job.entity_id, f.sourceFeatureId, f.featureIndex, geomJson, f.geometryType,
-            JSON.stringify(f.sourceAttributes), f.mappedElementType, f.mappedDescription,
-            f.mappedLocationName, f.mappedDistrict, f.isValidGeometry, f.geometryError,
-            JSON.stringify(f.mappedOperational ?? {}),
-          ],
-        )
+      // ── Bulk-insert import_features in a single transaction ──────────────────
+      const client = await getClient()
+      try {
+        await client.query('BEGIN')
+        for (const f of result.features) {
+          const geomJson = (f.isValidGeometry && f.geometry) ? JSON.stringify(f.geometry) : null
+          await client.query(
+            `INSERT INTO import_features
+               (import_job_id, entity_id, source_feature_id, feature_index, geometry, geometry_type,
+                source_attributes, mapped_element_type, mapped_description,
+                mapped_location_name, mapped_district, is_valid_geometry, geometry_error,
+                mapped_operational, raster_images, import_status)
+             VALUES ($1,$2,$3,$4,
+               CASE
+                 WHEN $5::text IS NOT NULL
+                 THEN ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON($5::text)), 4326)
+                 ELSE NULL
+               END,
+               $6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,
+               CASE WHEN $12 THEN 'validated' ELSE 'rejected' END)`,
+            [
+              job.id, job.entity_id, f.sourceFeatureId, f.featureIndex, geomJson, f.geometryType,
+              JSON.stringify(f.sourceAttributes), f.mappedElementType, f.mappedDescription,
+              f.mappedLocationName, f.mappedDistrict, f.isValidGeometry, f.geometryError,
+              JSON.stringify(f.mappedOperational ?? {}), JSON.stringify(f.rasterImages ?? []),
+            ],
+          )
+        }
+        await client.query('COMMIT')
+      } catch (txErr) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw txErr
+      } finally {
+        client.release()
       }
 
       const previewFeatures = result.features.filter(f => f.isValidGeometry).slice(0, 10)
@@ -629,23 +679,63 @@ async function runGISValidation(job, file, fieldMapping) {
 
       await audit('import_job', job.id, 'gis_validated', { id: job.created_by, entityId: job.entity_id },
         { total: result.totalCount, valid: result.validCount, invalid: result.invalidCount })
+
     } else {
-      // Insert directly to spatial_layer_features for operational layers
+      // ── Bulk-insert spatial_layer_features in a single transaction ────────────
+      const client = await getClient()
       let importedCount = 0
-      for (const f of result.features) {
-        if (!f.isValidGeometry) continue
-        const geomJson = JSON.stringify(f.geometry)
-        await query(
-          `INSERT INTO spatial_layer_features
-             (spatial_layer_id, entity_id, feature_name, feature_type, geometry, attributes)
-           VALUES ($1, $2, $3, $4, ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON($5::text)), 4326), $6)`,
-          [
-            job.spatial_layer_id, job.entity_id,
-            f.mappedDescription || f.sourceAttributes.name || `Feature ${f.featureIndex}`,
-            f.geometryType, geomJson, JSON.stringify(f.sourceAttributes),
-          ],
-        )
-        importedCount++
+      try {
+        await client.query('BEGIN')
+        for (const f of result.features) {
+          if (!f.isValidGeometry) continue
+          const mo       = f.mappedOperational || {}
+          const sa       = f.sourceAttributes  || {}
+          const geomJson = JSON.stringify(f.geometry)
+
+          // Feature name resolution (priority order):
+          //   1. featureName if auto-detected or manually mapped
+          //   2. municipality/district (Arabic: اسم_البلدية maps to municipality synonym)
+          //   3. raw 'name' property — standard GeoJSON convention
+          //   4. direct Arabic property names
+          //   5. index fallback
+          const featureName = (
+            mo.featureName ||
+            mo.municipality || mo.district || mo.locationName ||
+            mo.description  ||
+            sa.name || sa.NAME || sa.Name ||
+            sa['اسم_البلدية'] || sa['اسم_الحي'] || sa['اسم_المنطقة'] || sa['اسم_العقد'] || sa['اسم'] ||
+            `Feature ${f.featureIndex}`
+          )
+          const featureLabel  = mo.featureLabel || null
+          const priorityLevel = mo.priorityLevel != null ? (parseInt(mo.priorityLevel, 10) || null) : null
+          const slaHours      = mo.slaHours      != null ? (parseInt(mo.slaHours,      10) || null) : null
+          const contractId    = mo.contractId    || null
+          const neighborhood  = mo.district      || null
+          const operNotes     = mo.remarks       || null
+
+          await client.query(
+            `INSERT INTO spatial_layer_features
+               (spatial_layer_id, entity_id, feature_name, feature_label, feature_type,
+                geometry, attributes,
+                priority_level, sla_hours, contract_id, neighborhood, operational_notes)
+             VALUES ($1, $2, $3, $4, $5,
+                     ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON($6::text)), 4326), $7,
+                     $8::integer, $9::integer, $10, $11, $12)`,
+            [
+              job.spatial_layer_id, job.entity_id,
+              featureName, featureLabel, f.geometryType,
+              geomJson, JSON.stringify(sa),
+              priorityLevel, slaHours, contractId, neighborhood, operNotes,
+            ],
+          )
+          importedCount++
+        }
+        await client.query('COMMIT')
+      } catch (txErr) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw txErr
+      } finally {
+        client.release()
       }
 
       await query(
@@ -656,14 +746,18 @@ async function runGISValidation(job, file, fieldMapping) {
         [result.totalCount, importedCount, job.id],
       )
 
-      await audit('spatial_layer', job.spatial_layer_id, 'layer_imported', { id: job.created_by, entityId: job.entity_id },
-        { total: result.totalCount, imported: importedCount })
+      await audit('spatial_layer', job.spatial_layer_id, 'layer_imported',
+        { id: job.created_by, entityId: job.entity_id },
+        { total: result.totalCount, imported: importedCount },
+      )
     }
   } catch (err) {
     await query(
       `UPDATE import_jobs SET status='failed', processing_error=$1, updated_at=NOW() WHERE id=$2`,
       [err.message, job.id],
-    )
+    ).catch(() => {})
+  } finally {
+    clearTimeout(timeoutHandle)
   }
 }
 
@@ -837,16 +931,19 @@ router.post('/gis/features/:id/confirm', requirePermission('create_report'), asy
     const longitude = geo?.lng != null ? String(geo.lng) : null
 
     const mo = feature.mapped_operational || {}
+    const reportNumber = await nextReportNumber(client)
     const { rows: [report] } = await client.query(
       `INSERT INTO reports
          (entity_id, import_feature_id, ingestion_source, element_id, element_label,
           status, description, location_name, district, gps_lat, gps_lng, created_by,
           gis_external_id, gis_contractor, gis_agency, gis_severity,
           gis_violation_type, gis_observation_date, gis_notes, gis_operational_metadata,
+          report_number, municipality, priority,
           location)
        VALUES ($1,$2,'gis_import',$3,$4,'draft',$5,$6,$7,
                $8::double precision,$9::double precision,$10,
                $11,$12,$13,$14,$15,$16,$17,$18::jsonb,
+               $19,$20,$21,
          CASE
            WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
            THEN ST_SetSRID(ST_MakePoint($9::double precision,$8::double precision),4326)
@@ -861,8 +958,10 @@ router.post('/gis/features/:id/confirm', requirePermission('create_report'), asy
         feature.mapped_location_name, feature.mapped_district,
         latitude, longitude, req.user.id,
         mo.externalId || null, mo.contractor || null, mo.agency || null, mo.severity || null,
-        mo.violationType || null, mo.observationDate || null, mo.remarks || null,
+        mo.violationCategory || mo.violationType || null,
+        mo.observationDate || null, mo.remarks || null,
         JSON.stringify(mo),
+        reportNumber, mo.municipality || null, mo.priorityLevel || null,
       ],
     )
 
@@ -872,13 +971,14 @@ router.post('/gis/features/:id/confirm', requirePermission('create_report'), asy
     )
 
     await audit('import_feature', feature.id, 'gis_feature_confirmed', req.user,
-      { reportId: report.id, elementType: elementType ?? feature.mapped_element_type, notes }, client)
+      { reportId: report.id, reportNumber, elementType: elementType ?? feature.mapped_element_type, notes }, client)
     await audit('report', report.id, 'created', req.user,
       { source: 'gis_import', importFeatureId: feature.id, reviewedIndividually: true }, client)
 
     await client.query('COMMIT')
     await enrichReportSpatially(report.id, report.location, feature.job_entity_id)
-    res.status(201).json({ success: true, reportId: report.id, report })
+    await attachRasterImages(report.id, feature.raster_images, req.user.id, null)
+    res.status(201).json({ success: true, reportId: report.id, reportNumber, report })
   } catch (err) {
     await client.query('ROLLBACK')
     console.error('[ingestion/gis] feature confirm error:', err)
@@ -923,16 +1023,19 @@ router.post('/gis/features/bulk-confirm', requirePermission('create_report'), as
       const lng = geo?.lng != null ? String(geo.lng) : null
 
       const bmo = feature.mapped_operational || {}
+      const bulkReportNumber = await nextReportNumber(client)
       const { rows: [report] } = await client.query(
         `INSERT INTO reports
            (entity_id, import_feature_id, ingestion_source, element_id, element_label,
             status, description, location_name, district, gps_lat, gps_lng, created_by,
             gis_external_id, gis_contractor, gis_agency, gis_severity,
             gis_violation_type, gis_observation_date, gis_notes, gis_operational_metadata,
+            report_number, municipality, priority,
             location)
          VALUES ($1,$2,'gis_import',$3,$4,'draft',$5,$6,$7,
                  $8::double precision,$9::double precision,$10,
                  $11,$12,$13,$14,$15,$16,$17,$18::jsonb,
+                 $19,$20,$21,
            CASE WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
                 THEN ST_SetSRID(ST_MakePoint($9::double precision,$8::double precision),4326)
                 ELSE NULL END)
@@ -941,8 +1044,10 @@ router.post('/gis/features/bulk-confirm', requirePermission('create_report'), as
          feature.mapped_description, feature.mapped_location_name, feature.mapped_district,
          lat, lng, req.user.id,
          bmo.externalId || null, bmo.contractor || null, bmo.agency || null, bmo.severity || null,
-         bmo.violationType || null, bmo.observationDate || null, bmo.remarks || null,
-         JSON.stringify(bmo)],
+         bmo.violationCategory || bmo.violationType || null,
+         bmo.observationDate || null, bmo.remarks || null,
+         JSON.stringify(bmo),
+         bulkReportNumber, bmo.municipality || null, bmo.priorityLevel || null],
       )
 
       await client.query(
@@ -950,10 +1055,11 @@ router.post('/gis/features/bulk-confirm', requirePermission('create_report'), as
         [report.id, feature.id],
       )
       await audit('report', report.id, 'created', req.user,
-        { source: 'gis_import', importFeatureId: feature.id, bulkConfirmed: true }, client)
+        { source: 'gis_import', importFeatureId: feature.id, bulkConfirmed: true, reportNumber: bulkReportNumber }, client)
 
       await client.query('COMMIT')
       await enrichReportSpatially(report.id, report.location, feature.job_entity_id)
+      await attachRasterImages(report.id, feature.raster_images, req.user.id, null)
       confirmed++
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {})
@@ -1038,6 +1144,81 @@ router.post('/gis/features/bulk-delete', requirePermission('create_report'), asy
   res.json({ success: true, deleted: rows.length })
 })
 
+// PATCH /api/ingestion/gis/jobs/:id/remap
+// Re-applies a new field mapping to all validated features of a job.
+// Called when the user adjusts field assignments after seeing the preview.
+// Does NOT re-upload or re-validate geometry — only recalculates mapped values.
+router.patch('/gis/jobs/:id/remap', requirePermission('create_report'), async (req, res) => {
+  const { fieldMapping } = req.body
+  if (!fieldMapping || typeof fieldMapping !== 'object') {
+    return res.status(400).json({ error: 'fieldMapping object is required' })
+  }
+
+  const { rows: [job] } = await query(`SELECT * FROM import_jobs WHERE id = $1`, [req.params.id])
+  if (!job) return res.status(404).json({ error: 'Import job not found' })
+
+  const scope = buildReportScope(req.user)
+  if (scope.type === 'entity' && job.entity_id !== scope.entityId) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+  if (job.status !== 'preview_ready') {
+    return res.status(409).json({ error: 'يمكن إعادة تعيين الحقول فقط في مرحلة المعاينة', status: job.status })
+  }
+
+  // Persist updated field_mapping on the job
+  await query(`UPDATE import_jobs SET field_mapping=$1::jsonb, updated_at=NOW() WHERE id=$2`,
+    [JSON.stringify(fieldMapping), job.id])
+
+  // Re-process all validated features of this job
+  const { rows: features } = await query(
+    `SELECT id, source_attributes FROM import_features WHERE import_job_id=$1 AND import_status='validated'`,
+    [job.id],
+  )
+
+  let updated = 0
+  for (const feat of features) {
+    const props = typeof feat.source_attributes === 'string'
+      ? JSON.parse(feat.source_attributes)
+      : (feat.source_attributes ?? {})
+
+    const effectiveMapping  = buildEffectiveMapping(props, fieldMapping)
+    const mapped            = applyFieldMapping(props, effectiveMapping)
+    const rasterImages      = extractRasterAttributes(props)
+
+    await query(
+      `UPDATE import_features SET
+         mapped_element_type=$1, mapped_description=$2, mapped_location_name=$3,
+         mapped_district=$4, mapped_operational=$5::jsonb, raster_images=$6::jsonb,
+         updated_at=NOW()
+       WHERE id=$7`,
+      [
+        mapped.elementType, mapped.description, mapped.locationName,
+        mapped.district, JSON.stringify(mapped), JSON.stringify(rasterImages),
+        feat.id,
+      ],
+    )
+    updated++
+  }
+
+  // Rebuild preview_data with freshly-mapped features (up to 10)
+  const { rows: previewFeats } = await query(
+    `SELECT feature_index, geometry_type, source_attributes,
+            mapped_element_type, mapped_description, is_valid_geometry
+     FROM import_features
+     WHERE import_job_id=$1 AND import_status='validated' AND is_valid_geometry=true
+     ORDER BY feature_index ASC LIMIT 10`,
+    [job.id],
+  )
+
+  await query(
+    `UPDATE import_jobs SET preview_data=jsonb_set(COALESCE(preview_data,'{}'), '{features}', $1::jsonb), updated_at=NOW() WHERE id=$2`,
+    [JSON.stringify(previewFeats), job.id],
+  )
+
+  await audit('import_job', job.id, 'gis_remapped', req.user, { fieldMapping, updated })
+  res.json({ success: true, updated, message: `تم إعادة تعيين ${updated} عنصر بالتعيين الجديد` })
+})
+
 // POST /api/ingestion/gis/jobs/:id/import
 // Import validated GIS features as draft reports.
 // GIS imports are operational spatial datasets — each feature becomes a governable draft report.
@@ -1087,22 +1268,23 @@ router.post('/gis/jobs/:id/import', requirePermission('create_report'), async (r
       const latitude = geo?.lat != null ? String(geo.lat) : null
       const longitude = geo?.lng != null ? String(geo.lng) : null
 
+      const jmo = feature.mapped_operational || {}
+      const jobReportNumber = await nextReportNumber(null)
       const { rows: [report] } = await query(
         `INSERT INTO reports
            (entity_id, import_feature_id, ingestion_source, element_id, element_label,
             status, description, location_name, district, gps_lat, gps_lng, created_by,
+            gis_external_id, gis_contractor, gis_agency, gis_severity,
+            gis_violation_type, gis_observation_date, gis_notes, gis_operational_metadata,
+            report_number, municipality, priority,
             location)
-         VALUES ($1,$2,'gis_import',$3,$3,'draft',$4,$5,$6,$7::double precision,$8::double precision,$9,
+         VALUES ($1,$2,'gis_import',$3,$3,'draft',$4,$5,$6,
+                 $7::double precision,$8::double precision,$9,
+                 $10,$11,$12,$13,$14,$15,$16,$17::jsonb,
+                 $18,$19,$20,
            CASE
-             WHEN $7::double precision IS NOT NULL
-             AND $8::double precision IS NOT NULL
-             THEN ST_SetSRID(
-               ST_MakePoint(
-                 $8::double precision,
-                 $7::double precision
-               ),
-               4326
-             )
+             WHEN $7::double precision IS NOT NULL AND $8::double precision IS NOT NULL
+             THEN ST_SetSRID(ST_MakePoint($8::double precision,$7::double precision),4326)
              ELSE NULL
            END)
          RETURNING id, location`,
@@ -1111,10 +1293,16 @@ router.post('/gis/jobs/:id/import', requirePermission('create_report'), async (r
           feature.mapped_element_type, feature.mapped_description,
           feature.mapped_location_name, feature.mapped_district,
           latitude, longitude, job.created_by,
+          jmo.externalId || null, jmo.contractor || null, jmo.agency || null, jmo.severity || null,
+          jmo.violationCategory || jmo.violationType || null,
+          jmo.observationDate || null, jmo.remarks || null,
+          JSON.stringify(jmo),
+          jobReportNumber, jmo.municipality || null, jmo.priorityLevel || null,
         ],
       )
 
       await enrichReportSpatially(report.id, report.location, job.entity_id)
+      await attachRasterImages(report.id, feature.raster_images, job.created_by, null)
 
       await query(
         `UPDATE import_features SET import_status='imported', report_id=$1, updated_at=NOW() WHERE id=$2`,
@@ -1122,7 +1310,7 @@ router.post('/gis/jobs/:id/import', requirePermission('create_report'), async (r
       )
 
       await audit('report', report.id, 'created', req.user,
-        { source: 'gis_import', importJobId: job.id, featureId: feature.id })
+        { source: 'gis_import', importJobId: job.id, featureId: feature.id, reportNumber: jobReportNumber })
       importedCount++
     } catch (err) {
       console.error('[ingestion/gis] feature import error:', feature.id, err.message)

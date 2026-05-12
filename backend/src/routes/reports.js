@@ -171,22 +171,24 @@ router.post('/', requirePermission('create_report'), async (req, res) => {
   const latStr = lat != null ? String(lat) : null
   const lngStr = lng != null ? String(lng) : null
 
+  const { rows: [{ rn: reportNumber }] } = await query(`SELECT next_report_number() AS rn`)
+
   const { rows: [report] } = await query(
     `INSERT INTO reports
        (entity_id, ingestion_source, element_id, element_label, status, description,
-        district, location_name, gps_lat, gps_lng, created_by, location)
+        district, location_name, gps_lat, gps_lng, created_by, report_number, location)
      VALUES ($1,'manual',$2,$2,'draft',$3,$4,$5,
-             $6::double precision,$7::double precision,$8,
+             $6::double precision,$7::double precision,$8,$9,
        CASE
          WHEN $6::double precision IS NOT NULL AND $7::double precision IS NOT NULL
          THEN ST_SetSRID(ST_MakePoint($7::double precision,$6::double precision),4326)
          ELSE NULL
        END)
      RETURNING *`,
-    [entityId, element, description, district, location_name, latStr, lngStr, req.user.id],
+    [entityId, element, description, district, location_name, latStr, lngStr, req.user.id, reportNumber],
   )
 
-  await audit('report', report.id, 'created', req.user, { source: 'manual' })
+  await audit('report', report.id, 'created', req.user, { source: 'manual', reportNumber })
   res.status(201).json({ report })
 })
 
@@ -197,6 +199,7 @@ router.patch('/:id/status', requirePermission('view_reports'), async (req, res) 
   const scope = buildReportScope(req.user)
 
   const TRANSITION_PERMS = {
+    submitted:           'create_report',
     under_review:        'assign_report',
     assigned:            'assign_report',
     rejected:            'reject_report',
@@ -231,6 +234,25 @@ router.patch('/:id/status', requirePermission('view_reports'), async (req, res) 
     return res.status(403).json({ error: 'Forbidden', code: 'OWNERSHIP_MISMATCH' })
   }
 
+  // draft → submitted: validate required fields before the report enters the workflow
+  if (toStatus === 'submitted') {
+    if (report.status !== 'draft') {
+      return res.status(409).json({ error: 'يمكن تقديم البلاغات في مرحلة المسودة فقط', code: 'NOT_DRAFT' })
+    }
+    const missing = []
+    if (!report.element_id)  missing.push('element_id')
+    if (!report.description) missing.push('description')
+    if (report.gps_lat == null || report.gps_lng == null) missing.push('location')
+    if (!report.entity_id)   missing.push('entity_id')
+    if (missing.length > 0) {
+      return res.status(422).json({
+        error: 'البلاغ غير مكتمل — يرجى استيفاء جميع الحقول المطلوبة قبل التقديم',
+        code: 'INCOMPLETE_DRAFT',
+        missing,
+      })
+    }
+  }
+
   const setParams = [toStatus]
   const setClauses = ['status = $1', 'updated_at = NOW()']
 
@@ -249,6 +271,9 @@ router.patch('/:id/status', requirePermission('view_reports'), async (req, res) 
     }
     setParams.push(uuid)
     setClauses.push(`assigned_to = $${setParams.length}::uuid`)
+  }
+  if (toStatus === 'submitted') {
+    setClauses.push('submitted_at = NOW()')
   }
   if (toStatus === 'closed_final') {
     setClauses.push('closed_at = NOW()')

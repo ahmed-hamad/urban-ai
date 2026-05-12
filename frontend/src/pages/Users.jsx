@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { roleConfig } from '@/data/mockData'
 import { PERMISSIONS, PERMISSION_GROUPS, ROLE_DEFAULT_PERMISSIONS } from '@/data/permissions'
 import { useData } from '@/context/DataContext'
@@ -18,6 +18,8 @@ const STEPS = ['المعلومات الشخصية', 'الدور والصلاحي
 function AddUserModal({ onClose, onAdd, entities }) {
   const [step, setStep] = useState(1)
   const [showPass, setShowPass] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [apiError, setApiError] = useState('')
   const [form, setForm] = useState({
     name: '', email: '', phone: '',
     password: '', confirmPassword: '',
@@ -63,11 +65,15 @@ function AddUserModal({ onClose, onAdd, entities }) {
     return true
   }
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     if (!canNext()) return
+    setSaving(true)
+    setApiError('')
     const { confirmPassword, ...rest } = form
-    onAdd(rest)
+    const result = await onAdd(rest)
+    setSaving(false)
+    if (result?.error) { setApiError(result.error); return }
     onClose()
   }
 
@@ -280,7 +286,13 @@ function AddUserModal({ onClose, onAdd, entities }) {
           </div>
 
           {/* Footer */}
-          <div className="flex gap-2 px-6 py-4 border-t border-slate-100 dark:border-gray-800 flex-shrink-0">
+          <div className="flex flex-col gap-2 px-6 py-4 border-t border-slate-100 dark:border-gray-800 flex-shrink-0">
+            {apiError && (
+              <p className="text-xs text-red-500 dark:text-red-400 text-center bg-red-50 dark:bg-red-500/10 rounded-lg py-2 px-3">
+                {apiError}
+              </p>
+            )}
+            <div className="flex gap-2">
             {step > 1 && (
               <button type="button" onClick={() => setStep(s => s - 1)}
                 className="py-2.5 px-4 rounded-lg border border-slate-200 dark:border-gray-700 text-sm font-medium text-slate-600 dark:text-gray-400 hover:bg-slate-50 dark:hover:bg-gray-800 transition-colors">
@@ -293,11 +305,13 @@ function AddUserModal({ onClose, onAdd, entities }) {
                 التالي
               </button>
             ) : (
-              <button type="submit" disabled={!canNext()}
-                className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors">
+              <button type="submit" disabled={!canNext() || saving}
+                className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors flex items-center justify-center gap-2">
+                {saving && <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
                 إنشاء المستخدم
               </button>
             )}
+            </div>
           </div>
         </form>
       </div>
@@ -384,6 +398,8 @@ function EditUserModal({ target, actorRole, entities, onSave, onClose }) {
     entityId:    target.entityId || '',
     entityName:  target.entity || '',
   })
+  const [saving, setSaving] = useState(false)
+  const [apiError, setApiError] = useState('')
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
 
@@ -413,9 +429,11 @@ function EditUserModal({ target, actorRole, entities, onSave, onClose }) {
   const entityRequired = form.role !== 'admin'
   const canSave = form.name.trim() && form.email.trim() && (!entityRequired || form.entityName || form.entityId)
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (blockedRoles.includes(form.role)) return
-    onSave({
+    setSaving(true)
+    setApiError('')
+    const result = await onSave({
       name:        form.name.trim(),
       email:       form.email.trim(),
       phone:       form.phone.trim(),
@@ -424,6 +442,9 @@ function EditUserModal({ target, actorRole, entities, onSave, onClose }) {
       entity:      form.entityName || form.entityId,
       entityId:    form.entityId || null,
     })
+    setSaving(false)
+    if (result?.error) { setApiError(result.error); return }
+    onClose()
   }
 
   return (
@@ -548,14 +569,22 @@ function EditUserModal({ target, actorRole, entities, onSave, onClose }) {
         </div>
 
         {/* Footer */}
-        <div className="flex gap-2 px-6 py-4 border-t border-slate-100 dark:border-gray-800 sticky bottom-0 bg-white dark:bg-gray-900">
-          <button onClick={onClose} className="flex-1 border border-slate-200 dark:border-gray-700 rounded-xl py-2.5 text-sm text-slate-600 dark:text-gray-400 hover:bg-slate-50 dark:hover:bg-gray-800 transition-colors">
-            إلغاء
-          </button>
-          <button onClick={handleSave} disabled={!canSave}
-            className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl py-2.5 text-sm font-medium transition-colors">
-            حفظ التعديلات
-          </button>
+        <div className="flex flex-col gap-2 px-6 py-4 border-t border-slate-100 dark:border-gray-800 sticky bottom-0 bg-white dark:bg-gray-900">
+          {apiError && (
+            <p className="text-xs text-red-500 dark:text-red-400 text-center bg-red-50 dark:bg-red-500/10 rounded-lg py-2 px-3">
+              {apiError}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button onClick={onClose} className="flex-1 border border-slate-200 dark:border-gray-700 rounded-xl py-2.5 text-sm text-slate-600 dark:text-gray-400 hover:bg-slate-50 dark:hover:bg-gray-800 transition-colors">
+              إلغاء
+            </button>
+            <button onClick={handleSave} disabled={!canSave || saving}
+              className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-2">
+              {saving && <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
+              حفظ التعديلات
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -590,11 +619,6 @@ function UserViewModal({ user, reports, onClose }) {
                 <span className={`inline-flex text-xs px-2.5 py-0.5 rounded-full border font-medium ${role.bg} ${role.color} ${role.border}`}>
                   {role.label}
                 </span>
-                {user.isSystemAdmin && (
-                  <span className="inline-flex text-xs px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-500/30">
-                    مدير النظام
-                  </span>
-                )}
                 {user.status === 'inactive' && (
                   <span className="inline-flex text-xs px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-500/30">
                     معطّل
@@ -646,7 +670,7 @@ function UserViewModal({ user, reports, onClose }) {
             <p className="text-xs font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wide mb-2">
               الصلاحيات ({(user.permissions || []).length})
             </p>
-            {user.permissions?.includes('all') ? (
+            {user.role === 'admin' && (user.permissions || []).length === 15 ? (
               <p className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">جميع الصلاحيات (مدير النظام)</p>
             ) : (
               <div className="space-y-2">
@@ -679,7 +703,7 @@ function UserViewModal({ user, reports, onClose }) {
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
 export default function Users() {
-  const { users, reports, entities, addUser, updateUser, deleteUser } = useData()
+  const { users, usersLoading, reports, entities, addUser, updateUser, deleteUser, reactivateUser } = useData()
   const { user: currentUser } = useAuth()
   const [search, setSearch] = useState('')
   const [filterRole, setFilterRole] = useState('all')
@@ -705,8 +729,8 @@ export default function Users() {
 
   // Manager sees only users within their own entity (RBAC scope)
   const visibleUsers = useMemo(() => {
-    if (currentUser?.role === 'manager' && !currentUser?.isSystemAdmin) {
-      const myEntity = currentUser.entity || currentUser.dept || ''
+    if (currentUser?.role === 'manager') {
+      const myEntity = currentUser.entity || ''
       return myEntity
         ? users.filter(u => u.entity === myEntity || u.id === currentUser.id)
         : users
@@ -715,7 +739,7 @@ export default function Users() {
   }, [users, currentUser])
 
   const activeUsers = useMemo(() => visibleUsers.filter(u => u.status !== 'inactive'), [visibleUsers])
-  const inactiveUsers = useMemo(() => visibleUsers.filter(u => u.status === 'inactive' && !u.isSystemAdmin), [visibleUsers])
+  const inactiveUsers = useMemo(() => visibleUsers.filter(u => u.status === 'inactive'), [visibleUsers])
 
   const baseList = showInactive ? visibleUsers : activeUsers
 
@@ -725,14 +749,23 @@ export default function Users() {
     return true
   })
 
-  const handleDeactivateConfirm = (reason) => {
+  const handleDeactivateConfirm = async () => {
     if (!confirmDeactivate) return
-    deleteUser(confirmDeactivate.id, currentUser)
+    await deleteUser(confirmDeactivate.id)
     setConfirmDeactivate(null)
   }
 
-  const handleReactivate = (u) => {
-    updateUser(u.id, { status: 'active', deletedAt: null, deletedBy: null }, currentUser)
+  const handleReactivate = async (u) => {
+    await reactivateUser(u.id)
+  }
+
+  if (usersLoading && users.length === 0) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+        <span className="mr-3 text-sm text-slate-400 dark:text-gray-500">جاري تحميل المستخدمين...</span>
+      </div>
+    )
   }
 
   return (
@@ -740,7 +773,7 @@ export default function Users() {
       {showAdd && canManage && (
         <AddUserModal
           onClose={() => setShowAdd(false)}
-          onAdd={(data) => addUser(data, currentUser)}
+          onAdd={(data) => addUser(data)}
           entities={entities}
         />
       )}
@@ -764,7 +797,7 @@ export default function Users() {
           target={editingUser}
           actorRole={currentUser?.role}
           entities={entities}
-          onSave={(patch) => { updateUser(editingUser.id, patch, currentUser); setEditingUser(null) }}
+          onSave={(patch) => updateUser(editingUser.id, patch)}
           onClose={() => setEditingUser(null)}
         />
       )}
@@ -774,7 +807,7 @@ export default function Users() {
         <div>
           <div className="flex items-center gap-2 flex-wrap">
             <h1 className="text-xl font-bold text-slate-800 dark:text-white">إدارة المستخدمين</h1>
-            {currentUser?.role === 'manager' && !currentUser?.isSystemAdmin && (
+            {currentUser?.role === 'manager' && (
               <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-500/30">
                 <Lock size={9} />
                 نطاق: {currentUser.entity || 'جهتك'}
@@ -871,7 +904,6 @@ export default function Users() {
                       <p className="text-xs text-slate-400 dark:text-gray-500 mt-0.5 truncate">{u.entity || '—'}</p>
                     </div>
                     <div className="flex items-center gap-1 flex-shrink-0">
-                      {u.isSystemAdmin && <Lock size={12} className="text-amber-500" />}
                       {isInactive
                         ? <UserX size={12} className="text-red-400" />
                         : <div className={`w-2 h-2 rounded-full ${open > 0 ? 'bg-amber-400' : 'bg-emerald-400'}`} />
@@ -931,14 +963,14 @@ export default function Users() {
                   <Eye size={12} />عرض
                 </button>
 
-                {canManage && !u.isSystemAdmin && !isInactive && (
+                {canManage && !isInactive && (
                   <button onClick={() => setEditingUser(u)}
                     className="flex items-center justify-center gap-1 py-1.5 px-3 text-xs border border-blue-200 dark:border-blue-500/30 rounded-lg text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors font-medium">
                     <Pencil size={12} />تعديل
                   </button>
                 )}
 
-                {canManage && !u.isSystemAdmin && (
+                {canManage && (
                   isInactive ? (
                     <button onClick={() => handleReactivate(u)}
                       className="flex items-center justify-center gap-1 py-1.5 px-3 text-xs border border-emerald-200 dark:border-emerald-500/30 rounded-lg text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors font-medium">
@@ -952,9 +984,9 @@ export default function Users() {
                   )
                 )}
 
-                {(u.isSystemAdmin || !canManage) && (
-                  <span className="py-1.5 px-3 text-xs text-amber-500 dark:text-amber-400 flex items-center gap-1">
-                    <Lock size={11} />{u.isSystemAdmin ? 'محمي' : 'قراءة فقط'}
+                {!canManage && (
+                  <span className="py-1.5 px-3 text-xs text-slate-400 dark:text-gray-600 flex items-center gap-1">
+                    <Lock size={11} />قراءة فقط
                   </span>
                 )}
               </div>

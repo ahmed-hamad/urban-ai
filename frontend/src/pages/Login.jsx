@@ -2,22 +2,14 @@ import { useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/context/AuthContext'
 import { useTheme } from '@/context/ThemeContext'
-import { roleConfig } from '@/data/mockData'
-
-function getStoredUsers() {
-  try { return JSON.parse(localStorage.getItem('ua_users') || '[]') } catch { return [] }
-}
 
 export default function Login() {
-  const { isAuthenticated, login, loginWithPassword } = useAuth()
+  const { isAuthenticated, loginWithPassword } = useAuth()
   const { isDark, toggleTheme } = useTheme()
   const navigate = useNavigate()
   const [form, setForm] = useState({ email: '', password: '' })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-
-  // Quick access: read up to 4 real users from localStorage (populated by DataContext)
-  const quickUsers = getStoredUsers().slice(0, 4)
 
   if (isAuthenticated) return <Navigate to="/" replace />
 
@@ -25,20 +17,13 @@ export default function Login() {
     e.preventDefault()
     setLoading(true)
     setError('')
-    await new Promise(r => setTimeout(r, 600))
-    const success = loginWithPassword(form.email, form.password)
-    if (success) {
+    const result = await loginWithPassword(form.email, form.password)
+    if (result.success) {
       navigate('/')
     } else {
-      setError('البريد الإلكتروني أو كلمة المرور غير صحيحة')
+      setError(result.error || 'البريد الإلكتروني أو كلمة المرور غير صحيحة')
     }
     setLoading(false)
-  }
-
-  const quickLogin = (u) => {
-    const { password: _pw, ...safeUser } = u
-    login(safeUser)
-    navigate('/')
   }
 
   return (
@@ -169,38 +154,10 @@ export default function Login() {
             </button>
           </form>
 
-          {/* Quick access */}
-          {quickUsers.length > 0 && (
-            <div className="mt-8">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="flex-1 h-px bg-gray-800" />
-                <span className="text-xs text-gray-600">دخول سريع</span>
-                <div className="flex-1 h-px bg-gray-800" />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                {quickUsers.map(u => {
-                  const roleCfg = roleConfig[u.role] || roleConfig.monitor
-                  return (
-                    <button key={u.id} onClick={() => quickLogin(u)}
-                      className="bg-gray-800/60 hover:bg-gray-800 border border-gray-700 rounded-xl p-3 text-right transition-all group">
-                      <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
-                          {u.avatar}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-xs font-medium text-gray-300 group-hover:text-white truncate">{u.name.split(' ')[0]}</p>
-                          <p className="text-xs text-gray-600">{roleCfg.label}</p>
-                        </div>
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
-              <p className="text-xs text-gray-700 text-center mt-3">
-                مدير النظام: admin@albaha.gov.sa · admin@2024
-              </p>
-            </div>
-          )}
+          <div className="mt-8 text-xs text-gray-700 text-center space-y-1">
+            <p>admin@albaha.gov.sa · admin@2024</p>
+            <p>admin1@baha.com · Admin@1234</p>
+          </div>
         </div>
       </div>
     </div>

@@ -18,6 +18,8 @@ import Entities from './pages/Entities'
 import IngestionQueue from './pages/IngestionQueue'
 import GISImport from './pages/GISImport'
 import GISIntakeQueue from './pages/GISIntakeQueue'
+import ObservationLayers from './pages/ObservationLayers'
+import DuplicateAnalysis from './pages/DuplicateAnalysis'
 
 // Route-level RBAC guard — redirects to dashboard if role not authorized
 function RequireRole({ roles, children }) {
@@ -76,6 +78,16 @@ export default function App() {
               <Route path="/gis-intake" element={
                 <RequireRole roles={['admin', 'executive', 'manager']}>
                   <GISIntakeQueue />
+                </RequireRole>
+              } />
+              <Route path="/observations" element={
+                <RequireRole roles={['admin', 'executive', 'manager']}>
+                  <ObservationLayers />
+                </RequireRole>
+              } />
+              <Route path="/duplicates" element={
+                <RequireRole roles={['admin', 'executive', 'manager', 'auditor']}>
+                  <DuplicateAnalysis />
                 </RequireRole>
               } />
             </Route>

@@ -121,16 +121,16 @@ const ENTERPRISE_FIELD_CATEGORIES = [
 ]
 
 const FIELD_OPTIONS_OPERATIONAL = [
-  { key: 'description',       label: 'الوصف / اسم العنصر' },
-  { key: 'locationName',      label: 'اسم الموقع' },
-  { key: 'district_name',     label: 'اسم الحي' },
-  { key: 'municipality_name', label: 'اسم البلدية' },
-  { key: 'contract_id',       label: 'رقم العقد' },
-  { key: 'contractor_name',   label: 'اسم المقاول' },
-  { key: 'SLA_hours',         label: 'ساعات SLA' },
-  { key: 'external_entity',   label: 'الجهة الخارجية' },
-  { key: 'priority_level',    label: 'مستوى الأولوية' },
-  { key: 'operational_notes', label: 'ملاحظات تشغيلية' },
+  { key: 'featureName',    label: 'اسم العنصر / المنطقة / الحي  ★' },
+  { key: 'featureLabel',   label: 'الاسم الرسمي (عرض بديل)' },
+  { key: 'priorityLevel',  label: 'مستوى الأولوية (رقم 1–5) ★' },
+  { key: 'slaHours',       label: 'ساعات SLA ★' },
+  { key: 'contractId',     label: 'رقم العقد ★' },
+  { key: 'contractor',     label: 'اسم المقاول' },
+  { key: 'municipality',   label: 'البلدية (نص مرجعي)' },
+  { key: 'district',       label: 'الحي (نص مرجعي)' },
+  { key: 'description',    label: 'الوصف / ملاحظات الطبقة' },
+  { key: 'remarks',        label: 'ملاحظات إضافية' },
 ]
 
 const STATUS_CFG = {
@@ -818,6 +818,25 @@ export default function GISImport() {
   const navigate  = useNavigate()
   const hasToken = !!user?.token
 
+  // For admins with no entity_id: load entity list so they can pick a target
+  const [entities, setEntities]         = useState([])
+  const [selectedEntityId, setSelectedEntityId] = useState('')
+  const needsEntitySelect = hasToken && !user?.entityId
+
+  useEffect(() => {
+    if (!needsEntitySelect) return
+    apiFetch('/api/users/entities', user.token)
+      .then(d => {
+        const list = d.entities ?? []
+        setEntities(list)
+        if (list.length > 0) setSelectedEntityId(list[0].id)
+      })
+      .catch(() => {})
+  }, [needsEntitySelect, user?.token])  // eslint-disable-line
+
+  // Resolved entity to use for uploads
+  const effectiveEntityId = user?.entityId || selectedEntityId || null
+
   // Layer configuration state
   const [layerType, setLayerType]           = useState('reports')
   const [layerName, setLayerName]           = useState('')
@@ -840,6 +859,8 @@ export default function GISImport() {
   const [importMode, setImportMode]   = useState('all')
   const [importLimit, setImportLimit] = useState('')
   const [importOffset, setImportOffset] = useState('')
+  const [remapping, setRemapping]     = useState(false)
+  const [remapMsg, setRemapMsg]       = useState(null)
 
   const pollRef = useRef(null)
 
@@ -892,12 +913,40 @@ export default function GISImport() {
     setFieldMapping({}); setSourceCrs(''); setUploadPct(0)
     setImportMode('all'); setImportLimit(''); setImportOffset('')
     setLayerType('reports'); setLayerName(''); setGovernanceRole('operational'); setOwnershipType('internal')
+    setRemapping(false); setRemapMsg(null)
+  }
+
+  // ── Re-apply mapping ─────────────────────────────────────────────────────
+  async function handleRemap() {
+    if (!job || remapping) return
+    setRemapping(true)
+    setRemapMsg(null)
+    setError(null)
+    try {
+      const res = await apiFetch(`/api/ingestion/gis/jobs/${job.id}/remap`, user.token, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ fieldMapping }),
+      })
+      setRemapMsg(res.message ?? `تم تحديث ${res.updated} عنصر`)
+      // Refresh job to show updated preview
+      const updated = await apiFetch(`/api/ingestion/gis/jobs/${job.id}`, user.token)
+      setJob(updated.job)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setRemapping(false)
+    }
   }
 
   // ── Upload ────────────────────────────────────────────────────────────────
 
   async function handleUpload() {
     if (!file || uploading) return
+    if (!effectiveEntityId) {
+      setError('يرجى تحديد الجهة المستهدفة للاستيراد')
+      return
+    }
     if (layerType !== 'reports' && !layerName.trim()) {
       setError('اسم الطبقة مطلوب للطبقات المكانية غير البلاغات')
       return
@@ -907,7 +956,7 @@ export default function GISImport() {
     setUploadPct(0)
     try {
       const res = await uploadGISXHR(
-        file, user.token, user.entityId,
+        file, user.token, effectiveEntityId,
         fieldMapping, sourceCrs || null,
         { layerType, layerName: layerName.trim(), governanceRole, ownershipType },
         setUploadPct,
@@ -1010,6 +1059,29 @@ export default function GISImport() {
                     </button>
                   </div>
 
+                  {/* Entity selector — shown only for admins without a fixed entity */}
+                  {needsEntitySelect && (
+                    <div className="bg-white dark:bg-gray-900 rounded-2xl border border-slate-200 dark:border-gray-800 p-4 space-y-2">
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-white">
+                        الجهة المستهدفة <span className="text-red-500">*</span>
+                        <span className="text-slate-400 dark:text-gray-500 font-normal mr-1">(مدير النظام — حدد الجهة التي سيُضاف إليها الاستيراد)</span>
+                      </label>
+                      {entities.length === 0 ? (
+                        <p className="text-xs text-slate-400 dark:text-gray-500">جارٍ تحميل الجهات…</p>
+                      ) : (
+                        <select
+                          value={selectedEntityId}
+                          onChange={e => setSelectedEntityId(e.target.value)}
+                          className="w-full text-sm rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-slate-800 dark:text-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                        >
+                          {entities.map(e => (
+                            <option key={e.id} value={e.id}>{e.name}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
+
                   {/* Layer configuration */}
                   <LayerConfig
                     layerType={layerType}         setLayerType={setLayerType}
@@ -1083,13 +1155,37 @@ export default function GISImport() {
 
               {/* Field mapping (once preview is ready) */}
               {isPreviewReady && sourceFields.length > 0 && (
-                <FieldMapping
-                  sourceFields={sourceFields}
-                  fieldMapping={fieldMapping}
-                  onChange={setFieldMapping}
-                  fieldCategories={job?.layer_type === 'reports' ? ENTERPRISE_FIELD_CATEGORIES : null}
-                  fieldOptions={job?.layer_type !== 'reports' ? FIELD_OPTIONS_OPERATIONAL : null}
-                />
+                <>
+                  <FieldMapping
+                    sourceFields={sourceFields}
+                    fieldMapping={fieldMapping}
+                    onChange={setFieldMapping}
+                    fieldCategories={job?.layer_type === 'reports' ? ENTERPRISE_FIELD_CATEGORIES : null}
+                    fieldOptions={job?.layer_type !== 'reports' ? FIELD_OPTIONS_OPERATIONAL : null}
+                  />
+
+                  {/* Apply mapping button */}
+                  <div className="space-y-2">
+                    {remapMsg && (
+                      <div className="flex items-center gap-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-500/30 rounded-xl px-4 py-2.5 text-xs text-emerald-700 dark:text-emerald-400">
+                        <CheckCircle2 size={13} className="flex-shrink-0" />
+                        {remapMsg}
+                      </div>
+                    )}
+                    <button
+                      onClick={handleRemap}
+                      disabled={remapping || Object.keys(fieldMapping).length === 0}
+                      className="w-full flex items-center justify-center gap-2 border border-teal-400 dark:border-teal-500 text-teal-700 dark:text-teal-400 bg-teal-50 dark:bg-teal-900/20 hover:bg-teal-100 dark:hover:bg-teal-900/40 text-sm font-semibold py-2.5 rounded-xl transition-colors disabled:opacity-40"
+                    >
+                      {remapping
+                        ? <><RefreshCw size={14} className="animate-spin" /> جارٍ تطبيق التعيين…</>
+                        : <><Settings2 size={14} /> تطبيق التعيين الجديد على العناصر</>}
+                    </button>
+                    <p className="text-xs text-center text-slate-400 dark:text-gray-600">
+                      يُعيد حساب حقول العناصر المحققة دون إعادة رفع الملف
+                    </p>
+                  </div>
+                </>
               )}
 
               {/* Preview */}
@@ -1163,7 +1259,7 @@ export default function GISImport() {
       )}
 
       {/* ── Spatial Layers Manager (admin only) ─────────────────────────────── */}
-      {hasToken && (user?.role === 'admin' || user?.isSystemAdmin) && (
+      {hasToken && user?.role === 'admin' && (
         <>
           <div className="border-t border-slate-200 dark:border-gray-800 pt-6">
             <div className="flex items-center gap-2 mb-4">

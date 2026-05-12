@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS users (
   entity_id     UUID REFERENCES entities(id),
   permissions   TEXT[]   DEFAULT '{}',
   status        VARCHAR(20)  DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
+  phone         VARCHAR(20),
   avatar        VARCHAR(10),
   join_date     DATE DEFAULT CURRENT_DATE,
   created_at    TIMESTAMPTZ DEFAULT NOW(),

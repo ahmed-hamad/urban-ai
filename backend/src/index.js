@@ -7,6 +7,8 @@ import usersRouter from './routes/users.js'
 import violationsRouter from './routes/violations.js'
 import authRouter from './routes/auth.js'
 import ingestionRouter from './routes/ingestion.js'
+import observationsRouter from './routes/observations.js'
+import duplicatesRouter from './routes/duplicates.js'
 import { authMiddleware } from './middleware/auth.js'
 
 const app = express()
@@ -30,6 +32,8 @@ app.use('/api/reports', authMiddleware, reportsRouter)
 app.use('/api/users', authMiddleware, usersRouter)
 app.use('/api/violations', violationsRouter)
 app.use('/api/ingestion', authMiddleware, ingestionRouter)
+app.use('/api/observations', authMiddleware, observationsRouter)
+app.use('/api/duplicates', authMiddleware, duplicatesRouter)
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ error: 'Not found' }))
