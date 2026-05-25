@@ -1,11 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
-import { Upload, MapPin, CheckCircle, ChevronRight, ChevronLeft, X, Building2, Globe, Locate, GitBranch, HardHat, User, AlertCircle, Ban, Gavel } from 'lucide-react'
+import { Upload, MapPin, CheckCircle, ChevronRight, ChevronLeft, X, Building2, Globe, Locate, GitBranch, HardHat, User, AlertCircle, Ban, Gavel, ScanSearch } from 'lucide-react'
 import { regulationData } from '@/data/mockData'
 import { useAuth } from '@/context/AuthContext'
 import { useData } from '@/context/DataContext'
+
+const API = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
 
 const card = 'bg-white dark:bg-gray-900 border border-slate-200 dark:border-gray-800'
 const STEPS = ['رفع المرئيات', 'تحديد العنصر', 'اختيار المخالفات', 'الجهة المسؤولة', 'التفاصيل', 'مراجعة وإرسال']
@@ -155,11 +157,18 @@ const coordsChanged = (c) => c[0] !== DEFAULT_COORDS[0] || c[1] !== DEFAULT_COOR
 export default function ReportNew() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const { user } = useAuth()
-  const { addReport, users, entities, reports, contractors } = useData()
+  const { user, authFetch } = useAuth()
+  const { users, entities, reports, contractors } = useData()
   const [step, setStep] = useState(0)
   const [submitted, setSubmitted] = useState(false)
+  const [submitError, setSubmitError] = useState(null)
+  const [submitting, setSubmitting] = useState(false)
   const [exifNote, setExifNote] = useState(null) // 'found' | 'not_found' | null
+
+  // When navigating from IngestionQueue
+  const candidateId      = searchParams.get('candidateId') || null
+  const [candidateMedia, setCandidateMedia] = useState(null)
+  const candidateFetched = useRef(false)
 
   const parentId = searchParams.get('parentId') || null
   const isRepeat = searchParams.get('repeat') === 'true'
@@ -169,11 +178,12 @@ export default function ReportNew() {
   const [form, setForm] = useState({
     media: [],
     element: elementFromUrl,
-    elementConfirmed: !!elementFromUrl, // auto-confirm if pre-filled from URL
+    elementConfirmed: !!elementFromUrl,
     articles: [],
     entityType: parentReport?.entityType || '',
     entity: parentReport?.entity || '',
-    entityConfirmed: !!(parentReport?.entity), // auto-confirm if inherited from parent
+    entityId: '',
+    entityConfirmed: !!(parentReport?.entity),
     assignedTo: '',
     district: parentReport?.district || '',
     description: '',
@@ -197,8 +207,6 @@ export default function ReportNew() {
   const [customSourceInput, setCustomSourceInput] = useState('')
   const [addingCustomSource, setAddingCustomSource] = useState(false)
 
-  const { authFetch } = useAuth()
-
   // Fetch shared monitoring sources from backend
   useEffect(() => {
     authFetch('/api/reports/monitoring-sources')
@@ -206,6 +214,42 @@ export default function ReportNew() {
       .then(d => { if (d?.sources) setMonitoringSources(d.sources.map(s => s.label)) })
       .catch(() => {})
   }, [authFetch])
+
+  // Pre-fill form from detection candidate (navigated from IngestionQueue)
+  useEffect(() => {
+    if (!candidateId || candidateFetched.current || !user?.token) return
+    candidateFetched.current = true
+    authFetch(`/api/ingestion/candidates/${candidateId}`)
+      .then(r => r?.json())
+      .then(d => {
+        const c = d?.candidate
+        if (!c) return
+        setCandidateMedia(c)
+        setForm(f => ({
+          ...f,
+          element:          c.suggested_element_type || f.element,
+          elementConfirmed: !!(c.suggested_element_type),
+          coords:           c.gps_lat && c.gps_lng
+                              ? [parseFloat(c.gps_lat), parseFloat(c.gps_lng)]
+                              : f.coords,
+        }))
+        if (c.gps_lat && c.gps_lng) setExifNote('found')
+      })
+      .catch(() => {})
+  }, [candidateId, user?.token, authFetch])
+
+  // Once entities load, pre-fill entity from candidate
+  useEffect(() => {
+    if (!candidateMedia?.entity_id || !entities.length) return
+    setForm(f => {
+      if (f.entityConfirmed) return f  // don't overwrite user's manual selection
+      const ent = entities.find(e => e.id === candidateMedia.entity_id)
+      if (!ent) return f
+      const type = ['amana', 'municipality', 'agency', 'department'].includes(ent.type)
+        ? 'internal' : 'external'
+      return { ...f, entityId: ent.id, entity: ent.name, entityType: type, entityConfirmed: true }
+    })
+  }, [candidateMedia, entities])
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
@@ -292,10 +336,56 @@ export default function ReportNew() {
     setAddingCustomSource(false)
   }
 
-  const handleSubmit = () => {
-    const newReport = addReport(form, user)
-    setSubmitted(true)
-    setTimeout(() => navigate(parentId ? `/reports/${parentId}` : '/reports'), 2000)
+  const handleSubmit = async () => {
+    if (submitting) return
+    setSubmitting(true)
+    setSubmitError(null)
+    try {
+      const entityUUID = form.entityId || entities.find(e => e.name === form.entity)?.id || null
+      const fineTotal  = form.articles.reduce((s, item) => {
+        const a = selectedEl?.articles.find(x => x.id === item.id)
+        return s + ((a?.fineAmana || 0) * item.count)
+      }, 0)
+
+      const violatorName =
+        form.violatorType === 'establishment' ? form.violatorData.establishmentName :
+        form.violatorType === 'beneficiary'   ? form.violatorData.beneficiaryName :
+        form.violatorType === 'contractor'    ? (form.violatorData.contractorName || '') : null
+
+      const body = {
+        coords:             form.coords,
+        element:            form.element,
+        description:        form.description,
+        entity_id:          entityUUID,
+        district:           form.district,
+        monitoring_source:  form.monitoringSource,
+        priority:           form.priority,
+        violations_data:    {
+          articles:             form.articles,
+          violatorType:         form.violatorType,
+          violatorData:         form.violatorData,
+          violationsApplicable: form.violationsApplicable,
+          fineTotal,
+        },
+        estimated_fine:  fineTotal || null,
+        violator_name:   violatorName || null,
+        violator_type:   form.violatorType || null,
+        violator_id:     form.violatorType === 'beneficiary' ? form.violatorData.beneficiaryId : null,
+        ...(candidateId              ? { candidateId }        : {}),
+        ...(parentId                 ? { parent_id: parentId } : {}),
+      }
+
+      const res  = await authFetch('/api/reports', { method: 'POST', body: JSON.stringify(body) })
+      const data = await res?.json()
+      if (!res?.ok) throw new Error(data?.error || 'فشل إنشاء البلاغ')
+
+      setSubmitted(true)
+      setTimeout(() => navigate(parentId ? `/reports/${parentId}` : '/reports'), 2000)
+    } catch (e) {
+      setSubmitError(e.message)
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   if (submitted) {
@@ -320,6 +410,12 @@ export default function ReportNew() {
                 {'بلاغ متابعة'}
               </span>
             )}
+            {candidateId && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/30">
+                <ScanSearch size={10} />
+                {'من مرشح ذكاء اصطناعي'}
+              </span>
+            )}
           </div>
           <p className="text-slate-500 dark:text-gray-500 text-sm mt-0.5">
             {'الخطوة'} {step + 1} {'من'} {STEPS.length}
@@ -337,6 +433,27 @@ export default function ReportNew() {
       {step === 0 && (
         <div className={`${card} rounded-2xl p-6 space-y-5`}>
           <h2 className="font-semibold text-slate-700 dark:text-gray-200">{'رفع الصور ومقاطع الفيديو'}</h2>
+
+          {/* Candidate source banner */}
+          {candidateMedia && (
+            <div className="flex items-start gap-3 bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-500/30 rounded-xl p-4">
+              <ScanSearch size={16} className="text-violet-600 dark:text-violet-400 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-violet-700 dark:text-violet-300">مرشح كشف ذكاء اصطناعي</p>
+                <p className="text-xs text-violet-600 dark:text-violet-400 mt-0.5 truncate">
+                  {candidateMedia.file_name} · {candidateMedia.suggested_element_label || candidateMedia.suggested_element_type}
+                </p>
+              </div>
+              {(candidateMedia.file_path || candidateMedia.thumbnail_path) && (
+                <img
+                  src={`${API}/uploads/${(candidateMedia.thumbnail_path || candidateMedia.file_path).replace(/^uploads[/\\]/, '')}`}
+                  alt=""
+                  className="w-16 h-16 rounded-lg object-cover flex-shrink-0"
+                  onError={e => { e.currentTarget.style.display = 'none' }}
+                />
+              )}
+            </div>
+          )}
 
           <div onClick={() => document.getElementById('new-media').click()}
             className="border-2 border-dashed border-slate-200 dark:border-gray-700 rounded-xl p-8 text-center cursor-pointer hover:border-blue-300 dark:hover:border-blue-500/50 hover:bg-slate-50 dark:hover:bg-gray-800/50 transition-all">
@@ -707,11 +824,13 @@ export default function ReportNew() {
                 {'الجهة المسؤولة المقترحة: '} <strong>{entitySuggestion}</strong>
               </p>
               <div className="flex gap-2 mt-3">
-                <button onClick={() => { 
-                  set('entityType', 'internal'); 
-                  set('entity', entitySuggestion); 
-                  set('entityConfirmed', true);
-                  setEntitySuggestion(null);
+                <button onClick={() => {
+                  const ent = entities.find(e => e.name === entitySuggestion)
+                  set('entityType', 'internal')
+                  set('entity', entitySuggestion)
+                  set('entityId', ent?.id || '')
+                  set('entityConfirmed', true)
+                  setEntitySuggestion(null)
                 }}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
                   {'تأكيد الجهة'}
@@ -732,7 +851,7 @@ export default function ReportNew() {
                   { id: 'internal', label: 'جهة داخلية', sub: 'بلدية أو وكالة تابعة للأمانة', Icon: Building2, cls: 'border-blue-400 bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400' },
                   { id: 'external', label: 'جهة خارجية', sub: 'مياه، كهرباء، اتصالات، وزارة', Icon: Globe, cls: 'border-purple-400 bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-400' },
                 ].map(({ id, label, sub, Icon, cls }) => (
-                  <button key={id} onClick={() => { set('entityType', id); set('entity', ''); set('entityConfirmed', true) }}
+                  <button key={id} onClick={() => { set('entityType', id); set('entity', ''); set('entityId', ''); set('entityConfirmed', true) }}
                     className={`flex flex-col items-center gap-2 p-5 rounded-xl border-2 transition-all ${form.entityType === id ? cls : 'border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-800/50 text-slate-600 dark:text-gray-400'}`}>
                     <Icon size={28} />
                     <p className="font-semibold text-sm">{label}</p>
@@ -747,12 +866,25 @@ export default function ReportNew() {
                     <label className="text-sm font-medium text-slate-700 dark:text-gray-200 block mb-1.5">
                       {form.entityType === 'internal' ? 'الجهة الداخلية' : 'الجهة الخارجية'}
                     </label>
-                    <select value={form.entity} onChange={e => { set('entity', e.target.value); set('entityConfirmed', true) }}
+                    <select
+                      value={form.entityId || form.entity}
+                      onChange={e => {
+                        const val   = e.target.value
+                        const found = entities.find(x => x.id === val)
+                        set('entity',   found?.name || val)
+                        set('entityId', found?.id   || '')
+                        set('entityConfirmed', true)
+                      }}
                       className="w-full bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-xl px-4 py-2.5 text-sm text-slate-700 dark:text-gray-200 focus:outline-none focus:border-blue-500">
                       <option value="">{'اختر الجهة'}</option>
-                      {(form.entityType === 'internal' ? INTERNAL_LIST : EXTERNAL_LIST).map(e => (
-                        <option key={e} value={e}>{e}</option>
-                      ))}
+                      {(form.entityType === 'internal' ? internalEntities : externalEntities).length > 0
+                        ? (form.entityType === 'internal' ? internalEntities : externalEntities).map(e => (
+                            <option key={e.id} value={e.id}>{e.name}</option>
+                          ))
+                        : (form.entityType === 'internal' ? INTERNAL_LIST : EXTERNAL_LIST).map(n => (
+                            <option key={n} value={n}>{n}</option>
+                          ))
+                      }
                     </select>
                   </div>
                   <div>
@@ -901,7 +1033,7 @@ export default function ReportNew() {
 
       {/* Navigation */}
       <div className="flex items-center justify-between">
-        <button onClick={() => step === 0 ? navigate('/reports') : setStep(s => s - 1)}
+        <button onClick={() => step === 0 ? navigate(candidateId ? '/ingestion' : '/reports') : setStep(s => s - 1)}
           className="flex items-center gap-2 px-5 py-2.5 border border-slate-200 dark:border-gray-700 rounded-xl text-sm text-slate-600 dark:text-gray-400 hover:bg-slate-50 dark:hover:bg-gray-800 transition-colors">
           <ChevronRight size={16} />
           {step === 0 ? 'إلغاء' : 'السابق'}
@@ -919,11 +1051,16 @@ export default function ReportNew() {
             </button>
           </div>
         ) : (
-          <button onClick={handleSubmit}
-            className="flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-medium transition-colors">
-            <CheckCircle size={16} />
-            {'إرسال البلاغ'}
-          </button>
+          <div className="flex flex-col items-end gap-1">
+            {submitError && (
+              <p className="text-xs text-red-500 dark:text-red-400">{submitError}</p>
+            )}
+            <button onClick={handleSubmit} disabled={submitting}
+              className="flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl text-sm font-medium transition-colors">
+              <CheckCircle size={16} />
+              {submitting ? 'جارٍ الإرسال…' : 'إرسال البلاغ'}
+            </button>
+          </div>
         )}
       </div>
     </div>

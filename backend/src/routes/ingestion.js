@@ -1,8 +1,12 @@
 import { Router }   from 'express'
 import multer        from 'multer'
 import path          from 'path'
-import { mkdir }     from 'fs/promises'
+import { mkdir, writeFile, unlink } from 'fs/promises'
 import { randomUUID } from 'crypto'
+import { execFile }  from 'child_process'
+import { promisify } from 'util'
+
+const execFileAsync = promisify(execFile)
 import { requirePermission, buildReportScope } from '../middleware/auth.js'
 import { query, getClient } from '../services/db.js'
 import { extractMetadata, classifyFileType }   from '../services/ingestion/mediaProcessor.js'
@@ -12,8 +16,79 @@ import {
 } from '../services/ingestion/gisProcessor.js'
 import { suggestGroups, describeGroup }        from '../services/ingestion/candidateGrouper.js'
 import { enrichReportSpatially } from '../services/spatialGovernance.js'
+import { analyzeImage, PIPELINE_STATUS } from '../services/ingestion/detectionPipeline.js'
 
 const router = Router()
+
+// ─── Video frame extraction helpers ──────────────────────────────────────────
+
+// Extract up to MAX_FRAMES evenly-spaced JPEG frames from a video using ffmpeg.
+// Returns array of temp file paths (caller is responsible for cleanup, but we
+// clean up after analysis ourselves).
+const MAX_FRAMES = 5   // analyze at most 5 frames per video to control API cost
+
+async function extractFramesForAnalysis(videoPath, outputDir) {
+  const frames = []
+  try {
+    // Probe video duration
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      videoPath,
+    ]).catch(() => ({ stdout: '0' }))
+
+    const duration = parseFloat(stdout.trim()) || 0
+    if (duration <= 0) return frames
+
+    // Pick evenly-spaced timestamps (skip first and last 5% to avoid black frames)
+    const margin = Math.min(duration * 0.05, 2)
+    const usable = duration - margin * 2
+    const count  = Math.min(MAX_FRAMES, Math.max(1, Math.floor(usable / 5)))
+    const step   = usable / count
+
+    for (let i = 0; i < count; i++) {
+      const ts   = margin + i * step
+      const dest = path.join(outputDir, `frame-${randomUUID()}.jpg`)
+      await execFileAsync('ffmpeg', [
+        '-ss', String(ts),
+        '-i', videoPath,
+        '-frames:v', '1',
+        '-q:v', '3',
+        '-y', dest,
+      ])
+      frames.push(dest)
+    }
+  } catch (err) {
+    // ffmpeg not installed or failed — fall through to manual candidate
+    console.warn('[video-frames] ffmpeg unavailable or failed:', err.message)
+  }
+  return frames
+}
+
+// After AI analyzes multiple frames, deduplicate candidates with the same
+// element_type (keep the one with highest confidence).
+async function deduplicateCandidates(candidateIds) {
+  if (candidateIds.length <= 1) return candidateIds
+  const { rows } = await query(
+    `SELECT id, suggested_element_type, detection_confidence
+     FROM detection_candidates WHERE id = ANY($1::uuid[])`,
+    [candidateIds],
+  )
+  const best = new Map()
+  for (const r of rows) {
+    const prev = best.get(r.suggested_element_type)
+    if (!prev || Number(r.detection_confidence) > Number(prev.detection_confidence)) {
+      best.set(r.suggested_element_type, r)
+    }
+  }
+  const keep = new Set([...best.values()].map(r => r.id))
+  const drop = candidateIds.filter(id => !keep.has(id))
+  if (drop.length > 0) {
+    await query(`DELETE FROM detection_candidates WHERE id = ANY($1::uuid[])`, [drop])
+  }
+  return [...keep]
+}
 
 // ─── Report number generator ──────────────────────────────────────────────────
 async function nextReportNumber(client) {
@@ -82,9 +157,11 @@ const GIS_TYPE_MAP = {
   '.zip':     'shapefile',
 }
 
+const MAX_MEDIA_MB = Number(process.env.MAX_FILE_SIZE_MB ?? 500)
+
 const mediaUpload = multer({
   storage: mediaStorage,
-  limits:  { fileSize: 200 * 1024 * 1024 },  // 200 MB
+  limits:  { fileSize: MAX_MEDIA_MB * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (ALLOWED_MEDIA_MIME.has(file.mimetype)) return cb(null, true)
     cb(Object.assign(new Error(`Unsupported media type: ${file.mimetype}`), { code: 'UNSUPPORTED_TYPE' }))
@@ -120,15 +197,31 @@ async function audit(subjectType, subjectId, action, actor, meta = {}, dbClient 
 // Upload one or more media files.
 // Each file becomes one media_ingestion + one detection_candidate (pending_review).
 // No report is created. Human review is required.
-router.post('/media', requirePermission('create_report'), mediaUpload.array('files', 20), async (req, res) => {
+function handleMediaUpload(req, res, next) {
+  mediaUpload.array('files', 20)(req, res, (err) => {
+    if (!err) return next()
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `حجم الملف يتجاوز الحد المسموح (${MAX_MEDIA_MB} MB)`,
+        code:  'FILE_TOO_LARGE',
+        limitMB: MAX_MEDIA_MB,
+      })
+    }
+    if (err.code === 'UNSUPPORTED_TYPE') {
+      return res.status(415).json({ error: err.message, code: 'UNSUPPORTED_TYPE' })
+    }
+    next(err)
+  })
+}
+
+router.post('/media', requirePermission('create_report'), handleMediaUpload, async (req, res) => {
   if (!req.files?.length) {
     return res.status(400).json({ error: 'No files received', code: 'NO_FILES' })
   }
 
-  const entityId = req.user.entityId ?? req.body.entity_id
-  if (!entityId) {
-    return res.status(400).json({ error: 'entity_id is required', code: 'ENTITY_REQUIRED' })
-  }
+  // entity_id is now optional at upload — entity is assigned per detection candidate at confirm time.
+  // Monitors always have entityId from their JWT; admins may omit it.
+  const entityId = req.user.entityId ?? req.body.entity_id ?? null
 
   const created = []
   const failed  = []
@@ -146,7 +239,7 @@ router.post('/media', requirePermission('create_report'), mediaUpload.array('fil
            (entity_id, uploaded_by, file_name, file_path, file_type, mime_type, file_size_bytes,
             gps_lat, gps_lng, gps_altitude, capture_timestamp, exif_data, processing_status,
             location)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::double precision,$9::double precision,$10,$11,$12,'processed',
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::double precision,$9::double precision,$10,$11,$12,'pending',
            CASE
             WHEN $8::double precision IS NOT NULL
             AND $9::double precision IS NOT NULL
@@ -167,38 +260,87 @@ router.post('/media', requirePermission('create_report'), mediaUpload.array('fil
         ],
       )
 
-      const { rows: [candidate] } = await query(
-        `INSERT INTO detection_candidates
-           (media_ingestion_id, entity_id, detection_source, gps_lat, gps_lng, location)
-         VALUES ($1,$2,'manual',$3::double precision,$4::double precision,
-            CASE
-              WHEN $3::double precision IS NOT NULL
-              AND $4::double precision IS NOT NULL
-              THEN ST_SetSRID(
-                ST_MakePoint(
-                  $4::double precision,
-                  $3::double precision
-                ),
-                4326
-              )
-              ELSE NULL
-            END)
-         RETURNING id`,
-        [ingestion.id, entityId, gpsLat, gpsLng],
-      )
-
       await audit('media_ingestion', ingestion.id, 'media_uploaded', req.user, {
         fileName: file.originalname, fileType, hasGPS: meta.gpsLat != null,
       })
 
+      // ── AI detection ──────────────────────────────────────────────────────
+      let candidateIds = []
+      let detectionStatus = null
+
+      if (fileType === 'image') {
+        // Direct image analysis
+        const result = await analyzeImage(ingestion.id, file.path, {
+          mimeType: file.mimetype,
+          gpsLat:   meta.gpsLat,
+          gpsLng:   meta.gpsLng,
+        })
+        detectionStatus = result.status
+        candidateIds = result.candidateIds ?? []
+        if (result.status === PIPELINE_STATUS.FAILED) {
+          console.warn(`[ingestion/media] AI detection failed for ${file.originalname}: ${result.error}`)
+        }
+      } else if (fileType === 'video') {
+        // Extract representative frames then analyze each one
+        const frames = await extractFramesForAnalysis(file.path, MEDIA_DIR)
+        if (frames.length > 0) {
+          for (const framePath of frames) {
+            const result = await analyzeImage(ingestion.id, framePath, {
+              mimeType: 'image/jpeg',
+              gpsLat:   meta.gpsLat,
+              gpsLng:   meta.gpsLng,
+            })
+            if (result.candidateIds?.length) {
+              candidateIds.push(...result.candidateIds)
+              detectionStatus = result.status
+            }
+          }
+          // Cleanup temp frames after analysis
+          await Promise.allSettled(frames.map(f => unlink(f)))
+          // Remove duplicate element types (same violation found in multiple frames)
+          candidateIds = await deduplicateCandidates(candidateIds)
+        }
+        if (candidateIds.length === 0 && detectionStatus !== PIPELINE_STATUS.FAILED) {
+          detectionStatus = 'no_frames'
+        }
+      }
+
+      // ── Fallback: create one manual candidate if AI produced nothing ──────
+      if (candidateIds.length === 0) {
+        const { rows: [candidate] } = await query(
+          `INSERT INTO detection_candidates
+             (media_ingestion_id, entity_id, detection_source, gps_lat, gps_lng, location)
+           VALUES ($1,$2,'manual',$3::double precision,$4::double precision,
+              CASE
+                WHEN $3::double precision IS NOT NULL
+                AND $4::double precision IS NOT NULL
+                THEN ST_SetSRID(
+                  ST_MakePoint($4::double precision, $3::double precision),
+                  4326
+                )
+                ELSE NULL
+              END)
+           RETURNING id`,
+          [ingestion.id, entityId, gpsLat, gpsLng],
+        )
+        candidateIds = [candidate.id]
+        // Mark processed since we created the fallback candidate
+        await query(
+          `UPDATE media_ingestions SET processing_status='processed', processed_at=NOW() WHERE id=$1`,
+          [ingestion.id],
+        )
+      }
+
       created.push({
-        ingestionId: ingestion.id,
-        candidateId: candidate.id,
-        fileName:    file.originalname,
+        ingestionId:     ingestion.id,
+        candidateIds,
+        candidateCount:  candidateIds.length,
+        fileName:        file.originalname,
         fileType,
-        hasGPS:      meta.gpsLat != null,
-        gpsLat:      meta.gpsLat,
-        gpsLng:      meta.gpsLng,
+        detectionStatus,
+        hasGPS:          meta.gpsLat != null,
+        gpsLat:          meta.gpsLat,
+        gpsLng:          meta.gpsLng,
         captureTimestamp: meta.captureTimestamp,
       })
     } catch (err) {
@@ -207,13 +349,15 @@ router.post('/media', requirePermission('create_report'), mediaUpload.array('fil
     }
   }
 
+  const totalCandidates = created.reduce((s, r) => s + r.candidateCount, 0)
+
   res.status(201).json({
     success: true,
     created: created.length,
     failed:  failed.length,
     results: created,
     errors:  failed,
-    message: `${created.length} detection candidate(s) created. Human review required before any report is generated.`,
+    message: `${created.length} ملف مُرفَّع — ${totalCandidates} مرشح كشف. يتطلب التحقق البشري قبل إنشاء أي بلاغ.`,
   })
 })
 
@@ -260,7 +404,13 @@ router.get('/candidates', requirePermission('view_reports'), async (req, res) =>
              JOIN media_ingestions mi ON mi.id = dc.media_ingestion_id
              LEFT JOIN users u ON u.id = dc.reviewed_by WHERE 1=1`
 
-  if (scope.type === 'entity') { params.push(scope.entityId); sql += ` AND dc.entity_id = $${params.length}` }
+  if (scope.type === 'entity') {
+    // Show candidates assigned to this entity OR unassigned candidates uploaded by entity members
+    params.push(scope.entityId)
+    sql += ` AND (dc.entity_id = $${params.length}
+             OR (dc.entity_id IS NULL
+                 AND mi.uploaded_by IN (SELECT id FROM users WHERE entity_id = $${params.length})))`
+  }
   if (scope.type === 'user')   { params.push(scope.userId);   sql += ` AND mi.uploaded_by = $${params.length}` }
   if (review_status)           { params.push(review_status);  sql += ` AND dc.review_status = $${params.length}` }
   if (element_type)            { params.push(element_type);   sql += ` AND dc.suggested_element_type = $${params.length}` }
@@ -296,11 +446,37 @@ router.get('/candidates/:id', requirePermission('view_reports'), async (req, res
   res.json({ candidate: c })
 })
 
+// PATCH /api/ingestion/candidates/:id/tag
+// Update the suggested tag on a pending_review candidate without finalising the review.
+// Allows the reviewer to correct the element type/label before confirming.
+router.patch('/candidates/:id/tag', requirePermission('create_report'), async (req, res) => {
+  const { elementType, elementLabel } = req.body
+  if (!elementType && !elementLabel) {
+    return res.status(400).json({ error: 'elementType or elementLabel is required' })
+  }
+
+  const { rows } = await query(
+    `UPDATE detection_candidates SET
+       suggested_element_type  = CASE WHEN $1::text IS NOT NULL THEN $1 ELSE suggested_element_type  END,
+       suggested_element_label = CASE WHEN $2::text IS NOT NULL THEN $2 ELSE suggested_element_label END,
+       updated_at = NOW()
+     WHERE id = $3 AND review_status = 'pending_review'
+     RETURNING id, suggested_element_type, suggested_element_label`,
+    [elementType || null, elementLabel || null, req.params.id],
+  )
+  if (!rows.length) {
+    return res.status(404).json({ error: 'Candidate not found or already reviewed' })
+  }
+
+  await audit('detection_candidate', req.params.id, 'tag_updated', req.user, { elementType, elementLabel })
+  res.json({ success: true, candidate: rows[0] })
+})
+
 // PATCH /api/ingestion/candidates/:id/confirm
 // Human reviews and confirms a candidate → creates a draft report + report_media entry.
 // This is the ONLY path from candidate to report for media-based ingestion.
 router.patch('/candidates/:id/confirm', requirePermission('create_report'), async (req, res) => {
-  const { elementType, elementLabel, description, notes } = req.body
+  const { elementType, elementLabel, description, notes, entityId: bodyEntityId } = req.body
   const client = await getClient()
 
   try {
@@ -324,8 +500,16 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
       return res.status(409).json({ error: 'Candidate already reviewed', status: candidate.review_status })
     }
 
+    // Resolve entity: reviewer provides it (required when candidate has no entity),
+    // or fall back to the candidate's pre-set entity.
+    const resolvedEntityId = bodyEntityId || candidate.entity_id || req.user.entityId
+    if (!resolvedEntityId) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'entity_id is required to create report', code: 'ENTITY_REQUIRED' })
+    }
+
     const scope = buildReportScope(req.user)
-    if (scope.type === 'entity' && candidate.entity_id !== scope.entityId) {
+    if (scope.type === 'entity' && candidate.entity_id && candidate.entity_id !== scope.entityId) {
       await client.query('ROLLBACK')
       return res.status(403).json({ error: 'Forbidden', code: 'ENTITY_MISMATCH' })
     }
@@ -333,12 +517,14 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
     const candidateLat = candidate.gps_lat != null ? String(candidate.gps_lat) : null
     const candidateLng = candidate.gps_lng != null ? String(candidate.gps_lng) : null
 
+    const reportNumber = await nextReportNumber(client)
+
     const { rows: [report] } = await client.query(
       `INSERT INTO reports
          (entity_id, detection_candidate_id, ingestion_source, element_id, element_label,
-          status, description, gps_lat, gps_lng, created_by,
+          status, description, gps_lat, gps_lng, created_by, report_number,
           location)
-       VALUES ($1,$2,'media_upload',$3,$4,'draft',$5,$6::double precision,$7::double precision,$8,
+       VALUES ($1,$2,'media_upload',$3,$4,'draft',$5,$6::double precision,$7::double precision,$8,$9,
          CASE
            WHEN $6::double precision IS NOT NULL
            AND $7::double precision IS NOT NULL
@@ -353,10 +539,10 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
          END)
        RETURNING *`,
       [
-        candidate.entity_id, candidate.id,
+        resolvedEntityId, candidate.id,
         elementType  ?? candidate.suggested_element_type,
         elementLabel ?? candidate.suggested_element_label,
-        description, candidateLat, candidateLng, req.user.id,
+        description, candidateLat, candidateLng, req.user.id, reportNumber,
       ],
     )
 
@@ -376,18 +562,18 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
     await client.query(
       `UPDATE detection_candidates SET
          review_status = 'confirmed', reviewed_by = $1, reviewed_at = NOW(),
-         review_notes = $2, report_id = $3, updated_at = NOW()
-       WHERE id = $4`,
-      [req.user.id, notes, report.id, candidate.id],
+         review_notes = $2, report_id = $3, entity_id = $4, updated_at = NOW()
+       WHERE id = $5`,
+      [req.user.id, notes, report.id, resolvedEntityId, candidate.id],
     )
 
     await audit('detection_candidate', candidate.id, 'candidate_confirmed', req.user,
-      { reportId: report.id, elementType }, client)
+      { reportId: report.id, elementType, entityId: resolvedEntityId }, client)
     await audit('report', report.id, 'created', req.user,
       { source: 'media_upload', candidateId: candidate.id }, client)
 
     await client.query('COMMIT')
-    await enrichReportSpatially(report.id, report.location, candidate.entity_id)
+    await enrichReportSpatially(report.id, report.location, resolvedEntityId)
     res.status(201).json({ success: true, reportId: report.id, report })
   } catch (err) {
     await client.query('ROLLBACK')
@@ -484,11 +670,13 @@ router.post('/candidates/confirm-group', requirePermission('create_report'), asy
     const centroidLatStr = centroidLat != null ? String(centroidLat) : null
     const centroidLngStr = centroidLng != null ? String(centroidLng) : null
 
+    const groupReportNumber = await nextReportNumber(client)
+
     const { rows: [report] } = await client.query(
       `INSERT INTO reports
          (entity_id, ingestion_source, element_id, element_label, status, description,
-          gps_lat, gps_lng, created_by, location)
-       VALUES ($1,'media_upload',$2,$3,'draft',$4,$5::double precision,$6::double precision,$7,
+          gps_lat, gps_lng, created_by, report_number, location)
+       VALUES ($1,'media_upload',$2,$3,'draft',$4,$5::double precision,$6::double precision,$7,$8,
          CASE
            WHEN $5::double precision IS NOT NULL
            AND $6::double precision IS NOT NULL
@@ -502,7 +690,7 @@ router.post('/candidates/confirm-group', requirePermission('create_report'), asy
            ELSE NULL
          END)
        RETURNING *`,
-      [entityId, elementType, elementLabel, description, centroidLatStr, centroidLngStr, req.user.id],
+      [entityId, elementType, elementLabel, description, centroidLatStr, centroidLngStr, req.user.id, groupReportNumber],
     )
 
     await client.query(
@@ -1348,43 +1536,50 @@ router.get('/spatial-layers', requirePermission('view_reports'), async (req, res
   const scope = buildReportScope(req.user)
 
   const params = []
-  let sql = `
-    SELECT sl.*,
-           COUNT(slf.id) FILTER (WHERE slf.id IS NOT NULL) AS feature_count,
-           COALESCE(
-             json_agg(
-               json_build_object(
-                 'type', 'Feature',
-                 'geometry', ST_AsGeoJSON(slf.geometry)::json,
-                 'properties', json_build_object(
-                   'id',                slf.id,
-                   'feature_name',      slf.feature_name,
-                   'feature_type',      slf.feature_type,
-                   'attributes',        slf.attributes,
-                   'priority_level',    slf.priority_level,
-                   'contract_id',       slf.contract_id,
-                   'sla_hours',         slf.sla_hours,
-                   'operational_notes', slf.operational_notes
-                 )
-               ) ORDER BY slf.id
-             ) FILTER (WHERE slf.id IS NOT NULL),
-             '[]'::json
-           ) AS features
-    FROM spatial_layers sl
-    LEFT JOIN spatial_layer_features slf
-      ON slf.spatial_layer_id = sl.id AND slf.is_active = true
-    WHERE sl.is_active = true
-  `
+  let whereClause = `WHERE sl.is_active = true`
 
   if (scope.type === 'entity') {
     params.push(scope.entityId)
-    sql += ` AND sl.entity_id = $${params.length}`
+    whereClause += ` AND sl.entity_id = $${params.length}`
   } else if (scope.type === 'user') {
     params.push(scope.userId)
-    sql += ` AND sl.entity_id = (SELECT entity_id FROM users WHERE id = $${params.length})`
+    whereClause += ` AND sl.entity_id = (SELECT entity_id FROM users WHERE id = $${params.length})`
   }
 
-  sql += ` GROUP BY sl.id ORDER BY sl.layer_priority DESC, sl.created_at DESC`
+  // Use correlated subqueries with LIMIT 500 per layer to avoid loading full city datasets at once.
+  // This replaces the previous unbounded LEFT JOIN + json_agg that caused 400ms+ scans.
+  const sql = `
+    SELECT sl.*,
+           (SELECT COUNT(*) FROM spatial_layer_features
+            WHERE spatial_layer_id = sl.id AND is_active = true) AS feature_count,
+           COALESCE(
+             (SELECT json_agg(feat)
+              FROM (
+                SELECT json_build_object(
+                  'type',     'Feature',
+                  'geometry', ST_AsGeoJSON(slf.geometry)::json,
+                  'properties', json_build_object(
+                    'id',                slf.id,
+                    'feature_name',      slf.feature_name,
+                    'feature_type',      slf.feature_type,
+                    'attributes',        slf.attributes,
+                    'priority_level',    slf.priority_level,
+                    'contract_id',       slf.contract_id,
+                    'sla_hours',         slf.sla_hours,
+                    'operational_notes', slf.operational_notes
+                  )
+                ) AS feat
+                FROM spatial_layer_features slf
+                WHERE slf.spatial_layer_id = sl.id AND slf.is_active = true
+                LIMIT 500
+              ) sub
+             ),
+             '[]'::json
+           ) AS features
+    FROM spatial_layers sl
+    ${whereClause}
+    ORDER BY sl.layer_priority DESC, sl.created_at DESC
+  `
 
   const { rows } = await query(sql, params)
 

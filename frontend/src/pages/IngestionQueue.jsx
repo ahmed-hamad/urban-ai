@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/context/AuthContext'
+import { useData } from '@/context/DataContext'
+import { regulationData } from '@/data/mockData'
 import {
   Inbox, Image, Video, Upload, MapPin, Clock, CheckCircle2, XCircle,
-  Layers, RefreshCw, AlertTriangle, ScanSearch, Cpu, X, Plus,
+  Layers, RefreshCw, AlertTriangle, ScanSearch, Cpu, X, Plus, Tag, Search,
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
@@ -15,10 +18,11 @@ const REVIEW_TABS = [
 ]
 
 const SOURCE_META = {
-  manual:           { label: 'يدوي',           cls: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300' },
-  yolo:             { label: 'YOLO AI',         cls: 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400' },
-  frame_extraction: { label: 'إطار فيديو',      cls: 'bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400' },
-  drone:            { label: 'طائرة مسيّرة',    cls: 'bg-sky-50 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400' },
+  manual:           { label: 'يدوي',             cls: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300' },
+  yolo:             { label: 'YOLO AI',           cls: 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400' },
+  ai_vision:        { label: 'ذكاء اصطناعي',     cls: 'bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400' },
+  frame_extraction: { label: 'إطار فيديو',        cls: 'bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400' },
+  drone:            { label: 'طائرة مسيّرة',      cls: 'bg-sky-50 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400' },
 }
 
 const ALLOWED_MEDIA = [
@@ -175,38 +179,107 @@ function UploadRow({ file, status, progress, error, onRemove }) {
   )
 }
 
+// ─── Element type picker (shared by ConfirmModal and TagEditModal) ─────────────
+
+function ElementTypePicker({ value, onChange }) {
+  const [search, setSearch] = useState('')
+  const filtered = regulationData.filter(r =>
+    !search || r.name.includes(search)
+  )
+  return (
+    <div className="space-y-1.5">
+      <div className="relative">
+        <Search size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-gray-500 pointer-events-none" />
+        <input
+          value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="بحث في أنواع العناصر…"
+          className="w-full rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 pr-8 pl-3 py-2 text-sm text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </div>
+      <div className="max-h-40 overflow-y-auto rounded-lg border border-slate-200 dark:border-gray-700 divide-y divide-slate-100 dark:divide-gray-800">
+        {filtered.length === 0
+          ? <p className="text-xs text-slate-400 dark:text-gray-600 px-3 py-2 text-center">لا توجد نتائج</p>
+          : filtered.map(r => (
+            <button key={r.id} type="button"
+              onClick={() => onChange(r.id)}
+              className={`w-full text-right px-3 py-2 text-xs transition-colors ${
+                value === r.id
+                  ? 'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 font-semibold'
+                  : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-gray-800'
+              }`}>
+              {r.name}
+            </button>
+          ))
+        }
+      </div>
+      {value && (
+        <p className="text-xs text-blue-600 dark:text-blue-400 font-medium">
+          محدد: {regulationData.find(r => r.id === value)?.name ?? value}
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ─── Confirm dialog ───────────────────────────────────────────────────────────
 
 function ConfirmModal({ candidate, onConfirm, onClose }) {
+  const { entities } = useData()
+  const { user }     = useAuth()
+
   const [elementType, setElementType] = useState(candidate.suggested_element_type ?? '')
+  const [entityId, setEntityId]       = useState(candidate.entity_id ?? user?.entityId ?? '')
   const [description, setDescription] = useState('')
   const [notes, setNotes]             = useState('')
   const [busy, setBusy]               = useState(false)
   const [err, setErr]                 = useState(null)
 
+  const canSubmit = !!elementType && !!entityId
+
   async function submit() {
+    if (!canSubmit) return
     setBusy(true)
     setErr(null)
-    try { await onConfirm({ elementType, description, notes }) }
+    try { await onConfirm({ elementType, description, notes, entityId }) }
     catch (e) { setErr(e.message) }
     finally { setBusy(false) }
   }
 
+  const previewUrl = candidate.thumbnail_path
+    ? buildUploadUrl(candidate.thumbnail_path)
+    : candidate.file_type === 'image' && candidate.file_path
+      ? buildUploadUrl(candidate.file_path)
+      : null
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
         <h3 className="text-base font-bold text-slate-800 dark:text-white">تأكيد المرشح → بلاغ مسودة</h3>
+        {previewUrl && (
+          <img src={previewUrl} alt="" className="w-full h-40 object-cover rounded-xl" />
+        )}
         <div className="space-y-3">
           <div>
-            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">نوع العنصر</label>
-            <input value={elementType} onChange={e => setElementType(e.target.value)}
-              placeholder="مثال: لافتة مخالفة"
-              className="w-full rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">نوع العنصر (من اللائحة)</label>
+            <ElementTypePicker value={elementType} onChange={setElementType} />
           </div>
           <div>
             <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">الوصف</label>
-            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} resize="none"
+            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2}
               className="w-full rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+              الجهة المسؤولة
+              <span className="text-red-500 mr-1">*</span>
+            </label>
+            <select value={entityId} onChange={e => setEntityId(e.target.value)}
+              className="w-full rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">اختر الجهة المسؤولة…</option>
+              {entities.map(e => (
+                <option key={e.id} value={e.id}>{e.name}</option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">ملاحظات المراجع</label>
@@ -216,7 +289,7 @@ function ConfirmModal({ candidate, onConfirm, onClose }) {
         </div>
         {err && <p className="text-xs text-red-500">{err}</p>}
         <div className="flex gap-3 pt-1">
-          <button onClick={submit} disabled={busy}
+          <button onClick={submit} disabled={busy || !canSubmit}
             className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors disabled:opacity-50">
             {busy ? 'جارٍ الإنشاء…' : 'تأكيد وإنشاء بلاغ مسودة'}
           </button>
@@ -268,6 +341,58 @@ function RejectModal({ onReject, onClose }) {
   )
 }
 
+// ─── Tag edit dialog ──────────────────────────────────────────────────────────
+
+function TagEditModal({ candidate, onSave, onClose }) {
+  const [elementType, setElementType] = useState(candidate.suggested_element_type ?? '')
+  const [busy, setBusy]               = useState(false)
+  const [err, setErr]                 = useState(null)
+
+  async function submit() {
+    if (!elementType) return
+    setBusy(true)
+    setErr(null)
+    try { await onSave({ elementType }) }
+    catch (e) { setErr(e.message) }
+    finally { setBusy(false) }
+  }
+
+  const previewUrl = candidate.thumbnail_path
+    ? buildUploadUrl(candidate.thumbnail_path)
+    : candidate.file_type === 'image' && candidate.file_path
+      ? buildUploadUrl(candidate.file_path)
+      : null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-2">
+          <Tag size={16} className="text-blue-500" />
+          <h3 className="text-base font-bold text-slate-800 dark:text-white">تعديل التوسيم</h3>
+        </div>
+        {previewUrl && (
+          <img src={previewUrl} alt="" className="w-full h-40 object-cover rounded-xl" />
+        )}
+        <div>
+          <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1.5">نوع العنصر (من اللائحة)</label>
+          <ElementTypePicker value={elementType} onChange={setElementType} />
+        </div>
+        {err && <p className="text-xs text-red-500">{err}</p>}
+        <div className="flex gap-3 pt-1">
+          <button onClick={submit} disabled={busy || !elementType}
+            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors disabled:opacity-50">
+            {busy ? 'جارٍ الحفظ…' : 'حفظ التوسيم'}
+          </button>
+          <button onClick={onClose} disabled={busy}
+            className="px-4 text-sm text-slate-500 hover:text-slate-800 dark:text-gray-400 dark:hover:text-white transition-colors">
+            إلغاء
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Candidate card ───────────────────────────────────────────────────────────
 
 // Strip the leading 'uploads/' prefix before joining with API origin
@@ -277,7 +402,7 @@ function buildUploadUrl(filePath) {
   return `${API}/uploads/${relative}`
 }
 
-function CandidateCard({ c, isPending, onConfirm, onReject }) {
+function CandidateCard({ c, isPending, onConfirm, onReject, onTag }) {
   const src    = SOURCE_META[c.detection_source] ?? SOURCE_META.manual
   const hasGPS = c.gps_lat != null && c.gps_lng != null
 
@@ -340,15 +465,21 @@ function CandidateCard({ c, isPending, onConfirm, onReject }) {
 
         {/* Actions — pending only */}
         {isPending && (
-          <div className="flex gap-2 pt-1">
-            <button onClick={() => onConfirm(c)}
-              className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-50 dark:bg-emerald-900/20 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 text-xs font-semibold py-2 rounded-lg transition-colors">
-              <CheckCircle2 size={13} /> تأكيد
+          <div className="space-y-1.5 pt-1">
+            <button onClick={() => onTag(c)}
+              className="w-full flex items-center justify-center gap-1.5 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-400 text-xs font-semibold py-2 rounded-lg transition-colors">
+              <Tag size={13} /> تعديل التوسيم
             </button>
-            <button onClick={() => onReject(c)}
-              className="flex-1 flex items-center justify-center gap-1.5 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 text-xs font-semibold py-2 rounded-lg transition-colors">
-              <XCircle size={13} /> رفض
-            </button>
+            <div className="flex gap-2">
+              <button onClick={() => onConfirm(c)}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-50 dark:bg-emerald-900/20 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 text-xs font-semibold py-2 rounded-lg transition-colors">
+                <CheckCircle2 size={13} /> تأكيد وإنشاء بلاغ
+              </button>
+              <button onClick={() => onReject(c)}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 text-xs font-semibold py-2 rounded-lg transition-colors">
+                <XCircle size={13} /> رفض
+              </button>
+            </div>
           </div>
         )}
 
@@ -390,25 +521,27 @@ function Toast({ msg, type, onDismiss }) {
 
 export default function IngestionQueue() {
   const { user } = useAuth()
+  const { entities } = useData()
+  const navigate = useNavigate()
 
   // Upload state
-  const [pendingFiles, setPendingFiles]   = useState([])    // [{file, status, progress, error}]
+  const [pendingFiles, setPendingFiles]       = useState([])    // [{file, status, progress, error}]
   const [uploading, setUploading]         = useState(false)
   const [uploadSummary, setUploadSummary] = useState(null)  // {created, failed}
 
   // Candidate review state
-  const [activeTab, setActiveTab]           = useState('pending_review')
-  const [candidates, setCandidates]         = useState([])
-  const [total, setTotal]                   = useState(0)
-  const [loading, setLoading]               = useState(false)
-  const [loadErr, setLoadErr]               = useState(null)
+  const [activeTab, setActiveTab]     = useState('pending_review')
+  const [candidates, setCandidates]   = useState([])
+  const [total, setTotal]             = useState(0)
+  const [loading, setLoading]         = useState(false)
+  const [loadErr, setLoadErr]         = useState(null)
 
-  // Dialog state
-  const [confirmTarget, setConfirmTarget] = useState(null)
+  // Dialog state — confirm is now a navigation, only reject/tag need modals
   const [rejectTarget, setRejectTarget]   = useState(null)
+  const [tagTarget, setTagTarget]         = useState(null)
 
   // Grouping state
-  const [grouping, setGrouping]       = useState(false)
+  const [grouping, setGrouping]             = useState(false)
   const [groupSuggestions, setGroupSuggestions] = useState(null)
 
   const [toast, setToast] = useState(null)
@@ -467,7 +600,7 @@ export default function IngestionQueue() {
       const result = await uploadMediaXHR(
         files,
         user.token,
-        user.entityId,
+        user.entityId ?? null,
         (pct) => {
           setPendingFiles(prev => prev.map(e =>
             e.status === 'uploading' ? { ...e, progress: pct } : e
@@ -484,10 +617,12 @@ export default function IngestionQueue() {
           : { ...e, status: 'done', progress: 100 }
       }))
 
-      setUploadSummary({ created: result.created, failed: result.failed })
+      const totalCandidates = result.results?.reduce((s, r) => s + (r.candidateCount ?? 1), 0) ?? result.created
+      setUploadSummary({ created: result.created, failed: result.failed, candidates: totalCandidates })
 
       if (result.created > 0) {
-        showToast(`تم إنشاء ${result.created} مرشح كشف. راجعها أدناه.`)
+        const totalCands = result.results?.reduce((s, r) => s + (r.candidateCount ?? 1), 0) ?? result.created
+        showToast(`تم إنشاء ${totalCands} مرشح كشف من ${result.created} ملف. راجعها أدناه.`)
         // Switch to pending tab and reload
         setActiveTab('pending_review')
         setTimeout(loadCandidates, 400)
@@ -509,19 +644,6 @@ export default function IngestionQueue() {
     setPendingFiles(prev => prev.filter(e => e.status !== 'done'))
   }
 
-  // ── Confirm candidate ──────────────────────────────────────────────────────
-
-  async function submitConfirm(fields) {
-    const res = await apiFetch(
-      `/api/ingestion/candidates/${confirmTarget.id}/confirm`,
-      user.token,
-      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) },
-    )
-    showToast(`بلاغ مسودة مُنشأ — ID: ${res.report?.id?.slice(0, 8)}`)
-    setConfirmTarget(null)
-    loadCandidates()
-  }
-
   // ── Reject candidate ───────────────────────────────────────────────────────
 
   async function submitReject(reason) {
@@ -533,6 +655,22 @@ export default function IngestionQueue() {
     showToast('تم رفض المرشح')
     setRejectTarget(null)
     loadCandidates()
+  }
+
+  // ── Tag candidate ──────────────────────────────────────────────────────────
+
+  async function submitTag(fields) {
+    await apiFetch(
+      `/api/ingestion/candidates/${tagTarget.id}/tag`,
+      user.token,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) },
+    )
+    showToast('تم تحديث التوسيم')
+    // Update candidate in list without full reload
+    setCandidates(prev => prev.map(c =>
+      c.id === tagTarget.id ? { ...c, suggested_element_type: fields.elementType } : c
+    ))
+    setTagTarget(null)
   }
 
   // ── Suggest groups ─────────────────────────────────────────────────────────
@@ -624,7 +762,8 @@ export default function IngestionQueue() {
           <div className="flex items-start gap-2 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-100 dark:border-indigo-500/20 rounded-xl px-3 py-2.5">
             <Cpu size={13} className="text-indigo-500 dark:text-indigo-400 flex-shrink-0 mt-0.5" />
             <p className="text-xs text-indigo-700 dark:text-indigo-300">
-              عند تفعيل خط YOLO، ستظهر مرشحات الكشف التلقائي هنا تلقائياً. كل مرشح يتطلب تأكيداً بشرياً.
+              بعد الرفع يحلّل الذكاء الاصطناعي كل صورة تلقائياً ويُنشئ توسيمات للمخالفات المكتشفة.
+              كل توسيم يتطلب تأكيداً بشرياً وتحديداً للجهة المسؤولة قبل إنشاء البلاغ.
             </p>
           </div>
 
@@ -654,7 +793,7 @@ export default function IngestionQueue() {
                 <button onClick={handleUpload} disabled={uploading}
                   className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors disabled:opacity-50">
                   {uploading
-                    ? <><RefreshCw size={14} className="animate-spin" /> جارٍ الرفع…</>
+                    ? <><RefreshCw size={14} className="animate-spin" /> جارٍ الرفع والتحليل…</>
                     : <><Upload size={14} /> رفع {pendingFiles.filter(e => e.status === 'idle').length} ملف(ات)</>
                   }
                 </button>
@@ -664,15 +803,17 @@ export default function IngestionQueue() {
 
           {/* Upload summary */}
           {uploadSummary && (
-            <div className={`flex items-center gap-2 text-sm rounded-xl px-4 py-3 ${
+            <div className={`flex items-start gap-2 text-sm rounded-xl px-4 py-3 ${
               uploadSummary.failed === 0
                 ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300'
                 : 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300'
             }`}>
-              <CheckCircle2 size={15} />
-              {uploadSummary.created} مرشح مُنشأ.
-              {uploadSummary.failed > 0 && ` ${uploadSummary.failed} فشلت.`}
-              {' '}راجع المرشحات أدناه.
+              <CheckCircle2 size={15} className="flex-shrink-0 mt-0.5" />
+              <div>
+                <p>{uploadSummary.created} ملف مُرفَّع — تم اكتشاف <strong>{uploadSummary.candidates}</strong> مرشح بالذكاء الاصطناعي.</p>
+                {uploadSummary.failed > 0 && <p className="text-xs mt-0.5">{uploadSummary.failed} ملف فشل الرفع.</p>}
+                <p className="text-xs mt-0.5 opacity-80">راجع المرشحات أدناه وحدد الجهة المسؤولة لكل مرشح عند التأكيد.</p>
+              </div>
             </div>
           )}
         </div>
@@ -774,7 +915,9 @@ export default function IngestionQueue() {
               {candidates.map(c => (
                 <CandidateCard
                   key={c.id} c={c} isPending={isPending}
-                  onConfirm={setConfirmTarget} onReject={setRejectTarget}
+                  onConfirm={c => navigate(`/reports/new?candidateId=${c.id}`)}
+                  onReject={setRejectTarget}
+                  onTag={setTagTarget}
                 />
               ))}
             </div>
@@ -782,20 +925,20 @@ export default function IngestionQueue() {
         </div>
       )}
 
-      {/* Confirm dialog */}
-      {confirmTarget && (
-        <ConfirmModal
-          candidate={confirmTarget}
-          onConfirm={submitConfirm}
-          onClose={() => setConfirmTarget(null)}
-        />
-      )}
-
       {/* Reject dialog */}
       {rejectTarget && (
         <RejectModal
           onReject={submitReject}
           onClose={() => setRejectTarget(null)}
+        />
+      )}
+
+      {/* Tag edit dialog */}
+      {tagTarget && (
+        <TagEditModal
+          candidate={tagTarget}
+          onSave={submitTag}
+          onClose={() => setTagTarget(null)}
         />
       )}
 

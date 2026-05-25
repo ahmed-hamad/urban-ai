@@ -203,39 +203,93 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
 })
 
 // POST /api/reports
-// Manual report creation. Location (coords) is mandatory per SOP.
+// Manual and media-upload report creation. Location (coords) is mandatory per SOP.
+// When candidateId is provided the report is linked to the detection candidate and
+// ingestion_source is set to 'media_upload'.
 router.post('/', requirePermission('create_report'), async (req, res) => {
-  const { coords, element, description, entity_id, district, location_name, monitoring_source } = req.body
-  const entityId = req.user.entityId ?? entity_id
+  const {
+    coords, element, description, entity_id, district, location_name, monitoring_source,
+    priority, violations_data, estimated_fine, violator_name, violator_id, violator_type,
+    candidateId,
+  } = req.body
+
+  const entityId = entity_id || req.user.entityId
 
   if (!coords || !Array.isArray(coords) || coords.length !== 2) {
     return res.status(400).json({ error: 'الموقع الجغرافي إلزامي لإنشاء البلاغ', code: 'LOCATION_REQUIRED' })
+  }
+  if (!entityId) {
+    return res.status(400).json({ error: 'الجهة المسؤولة إلزامية', code: 'ENTITY_REQUIRED' })
+  }
+
+  // Validate candidateId format when provided
+  if (candidateId && !isUUID(candidateId)) {
+    return res.status(400).json({ error: 'Invalid candidateId format', code: 'INVALID_CANDIDATE_ID' })
   }
 
   const [lat, lng] = coords
   const latStr = lat != null ? String(lat) : null
   const lngStr = lng != null ? String(lng) : null
 
+  const ingestionSource = candidateId ? 'media_upload' : 'manual'
   const { rows: [{ rn: reportNumber }] } = await query(`SELECT next_report_number() AS rn`)
+
+  const violationsJson = violations_data ? JSON.stringify(violations_data) : null
+  const fineVal        = estimated_fine != null ? String(estimated_fine) : null
 
   const { rows: [report] } = await query(
     `INSERT INTO reports
-       (entity_id, ingestion_source, element_id, element_label, status, description,
+       (entity_id, ingestion_source, detection_candidate_id,
+        element_id, element_label, status, description,
         district, location_name, gps_lat, gps_lng, created_by, report_number,
-        monitoring_source, location)
-     VALUES ($1,'manual',$2,$2,'draft',$3,$4,$5,
-             $6::double precision,$7::double precision,$8,$9,$10,
+        monitoring_source, priority, violations_data,
+        estimated_fine, violator_name, violator_id, violator_type,
+        location)
+     VALUES ($1,$2,$3::uuid,$4,$4,'draft',$5,$6,$7,
+             $8::double precision,$9::double precision,$10,$11,$12,$13,
+             $14::jsonb,$15::numeric,$16,$17,$18,
        CASE
-         WHEN $6::double precision IS NOT NULL AND $7::double precision IS NOT NULL
-         THEN ST_SetSRID(ST_MakePoint($7::double precision,$6::double precision),4326)
+         WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
+         THEN ST_SetSRID(ST_MakePoint($9::double precision,$8::double precision),4326)
          ELSE NULL
        END)
      RETURNING *`,
-    [entityId, element, description, district, location_name, latStr, lngStr,
-     req.user.id, reportNumber, monitoring_source || null],
+    [
+      entityId, ingestionSource, candidateId || null,
+      element, description, district, location_name,
+      latStr, lngStr, req.user.id, reportNumber,
+      monitoring_source || null, priority || null,
+      violationsJson, fineVal, violator_name || null, violator_id || null, violator_type || null,
+    ],
   )
 
-  await audit('report', report.id, 'created', req.user, { source: 'manual', reportNumber, monitoring_source })
+  // If this report was created from a detection candidate, link them
+  if (candidateId) {
+    // Mark candidate as confirmed and attach media
+    const { rows: [candidate] } = await query(
+      `UPDATE detection_candidates
+         SET review_status = 'confirmed', reviewed_by = $1, reviewed_at = NOW(),
+             report_id = $2, entity_id = $3, updated_at = NOW()
+       WHERE id = $4 AND review_status = 'pending_review'
+       RETURNING media_ingestion_id`,
+      [req.user.id, report.id, entityId, candidateId],
+    )
+
+    // Copy source media as a report_media entry (phase=before)
+    if (candidate?.media_ingestion_id) {
+      await query(
+        `INSERT INTO report_media (report_id, media_ingestion_id, file_path, file_type, mime_type, phase, uploaded_by)
+         SELECT $1, id, file_path, file_type, mime_type, 'before', $2
+         FROM media_ingestions WHERE id = $3
+         ON CONFLICT DO NOTHING`,
+        [report.id, req.user.id, candidate.media_ingestion_id],
+      ).catch(() => {})
+    }
+  }
+
+  await audit('report', report.id, 'created', req.user, {
+    source: ingestionSource, reportNumber, monitoring_source, candidateId,
+  })
 
   // Notify managers/executives about the new report (fire-and-forget)
   onReportCreated({
