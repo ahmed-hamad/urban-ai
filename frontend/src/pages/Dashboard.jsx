@@ -487,7 +487,8 @@ export default function Dashboard() {
     return [...reports, ...apiNormalized]
   }, [reports, rawApiReports])
 
-  const stats = useMemo(() => computeStats(reports), [reports])
+  // Use merged reports (local + API/DB) for stats so numbers match the AI assistant
+  const stats = useMemo(() => computeStats(allMapReports), [allMapReports])
   const [panel, setPanel] = useState('reports')
   const [panelOpen, setPanelOpen] = useState(true)
   const [filterEl, setFilterEl] = useState('all')

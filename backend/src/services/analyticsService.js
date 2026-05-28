@@ -246,6 +246,85 @@ export async function getFinancialForecast({ period, group_by, scope } = {}) {
   return { groups: groupedRes.rows, summary: summaryRes.rows[0], period, group_by }
 }
 
+// ─── Report Detail + Audit Trail ─────────────────────────────────────────────
+
+export async function getReportDetail({ report_id, report_number, scope } = {}) {
+  const params = []
+  const where  = [`r.status != 'deleted'`]
+  addScopeFilter(where, params, scope)
+
+  // Determine lookup strategy
+  let orderClause = 'r.created_at ASC'
+  const lowerNum  = (report_number || '').toLowerCase()
+
+  if (report_id) {
+    params.push(report_id)
+    where.push(`r.id = $${params.length}::uuid`)
+  } else if (lowerNum === 'first' || lowerNum === 'أول' || lowerNum === 'الأول') {
+    orderClause = 'r.created_at ASC'
+  } else if (lowerNum === 'last' || lowerNum === 'latest' || lowerNum === 'أخير' || lowerNum === 'الأخير') {
+    orderClause = 'r.created_at DESC'
+  } else if (report_number) {
+    params.push(`%${report_number}%`)
+    where.push(`r.report_number ILIKE $${params.length}`)
+  }
+
+  const { rows } = await query(`
+    SELECT r.id, r.report_number, r.element_id, r.element_label,
+           r.status, r.closure_type, r.district, r.municipality, r.location_name,
+           r.gps_lat::double precision AS lat, r.gps_lng::double precision AS lng,
+           r.ingestion_source, r.estimated_fine::numeric AS estimated_fine,
+           r.description, r.created_at, r.updated_at,
+           e.name     AS entity_name,
+           u_a.full_name AS assigned_to_name,
+           u_c.full_name AS created_by_name
+    FROM reports r
+    LEFT JOIN entities e ON e.id = r.entity_id
+    LEFT JOIN users u_a  ON u_a.id = r.assigned_to
+    LEFT JOIN users u_c  ON u_c.id = r.created_by
+    WHERE ${where.join(' AND ')}
+    ORDER BY ${orderClause}
+    LIMIT 1
+  `, params)
+
+  if (!rows.length) return { error: 'لم يتم العثور على البلاغ ضمن نطاق صلاحياتك' }
+  const report = rows[0]
+
+  // Full audit trail
+  const { rows: auditRows } = await query(`
+    SELECT al.action, al.created_at, al.metadata,
+           u.full_name AS performed_by
+    FROM audit_logs al
+    LEFT JOIN users u ON u.id = al.performed_by
+    WHERE al.subject_type = 'report' AND al.subject_id = $1::uuid
+    ORDER BY al.created_at ASC
+    LIMIT 100
+  `, [report.id])
+
+  return { report, audit_trail: auditRows }
+}
+
+// ─── Element Types ────────────────────────────────────────────────────────────
+
+export async function getElementTypes({ scope } = {}) {
+  const params = []
+  const where  = [`r.status != 'deleted'`, `r.element_id IS NOT NULL`]
+  addScopeFilter(where, params, scope)
+
+  const { rows } = await query(`
+    SELECT r.element_id                          AS id,
+           COALESCE(r.element_label, r.element_id) AS label,
+           COUNT(*)                               AS report_count
+    FROM reports r
+    WHERE ${where.join(' AND ')}
+    GROUP BY r.element_id, r.element_label
+    ORDER BY report_count DESC
+    LIMIT 60
+  `, params)
+
+  return { elements: rows, total: rows.length }
+}
+
 // ─── Heatmap Data ─────────────────────────────────────────────────────────────
 
 export async function getHeatmapData({ element_type, period, municipality, scope } = {}) {

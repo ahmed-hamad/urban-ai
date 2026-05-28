@@ -12,6 +12,8 @@ import {
   getSpatialReports,
   getFinancialForecast,
   getHeatmapData,
+  getReportDetail,
+  getElementTypes,
 } from '../services/analyticsService.js'
 import { getDuplicateStats } from '../services/duplicateDetection.js'
 
@@ -98,6 +100,28 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'get_report_detail',
+    description: 'Get full details and complete audit trail (history of all status changes, actions, actors) for a single report. Use when the user asks about a specific report, its tracking log, history, or workflow journey. Also use for "البلاغ الأول" (first), "البلاغ الأخير" (last), or any specific report number.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        report_id:     { type: 'string', description: 'UUID of the report (if known)' },
+        report_number: {
+          type: 'string',
+          description: 'Report number (e.g. RPT-2024-001), OR the special values: "first" (oldest report), "last" (newest report). Use "first" when user says "البلاغ الأول" or "أول بلاغ".',
+        },
+      },
+    },
+  },
+  {
+    name: 'get_element_types',
+    description: 'Returns all element types (تشوه بصري categories) currently in the database with their IDs and Arabic labels. ALWAYS call this first when the user mentions an element by a common Arabic name (like "تسوير المباني", "حفريات", "لافتات") to find the correct element_id before querying other tools.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
 ]
 
 // ─── System Prompt ────────────────────────────────────────────────────────────
@@ -108,59 +132,65 @@ function buildSystemPrompt(user, scope) {
     scope.type === 'entity'       ? `محدود بجهة: ${user.entityName || scope.entityId}` :
                                     `محدود ببيانات المستخدم: ${user.name}`
 
-  return `أنت مساعد عمليات مكاني متخصص لمنصة UrbanAI لإدارة البلاغات الميدانية في أمانة الباحة.
+  return `أنت مساعد عمليات مكاني متخصص لمنصة UrbanAI لإدارة بلاغات التشوه البصري في أمانة الباحة.
 
-معلومات المستخدم:
-- الاسم: ${user.name || 'مستخدم'}، الدور: ${user.role}، الجهة: ${user.entityName || 'غير محدد'}
+## المستخدم الحالي
+- الاسم: ${user.name || 'مستخدم'} | الدور: ${user.role} | الجهة: ${user.entityName || 'غير محدد'}
 - نطاق البيانات: ${scopeDesc}
 
-مهامك:
-- تحليل أسئلة المستخدم حول البلاغات والمخالفات والأداء التشغيلي والتحليل المكاني
-- استخدام الأدوات المتاحة دائماً لاسترداد بيانات حقيقية من قاعدة البيانات
-- تقديم إجابات دقيقة وموثوقة باللغة العربية فقط
-- اقتراح التمثيل البياني أو الخريطة المناسبة
+## مصدر البيانات — مهم جداً
+بياناتك تأتي **حصراً من قاعدة البيانات PostgreSQL** (المصدر الرسمي).
+واجهة لوحة التحكم قد تعرض بلاغات محلية لم تُحفظ في قاعدة البيانات بعد، مما يسبب فروقاً ظاهرية في الأرقام. بياناتك هي المرجع الصحيح.
 
-قواعد صارمة:
-1. لا تولّد أرقاماً أو إحصاءات من تلقاء نفسك — استخدم الأدوات دائماً
+## حالات البلاغات (Status) في النظام
+- draft: مسودة | submitted: مُقدَّم | ai_classified: صُنِّف بالذكاء الاصطناعي
+- under_review: قيد المراجعة | assigned: مُسند | in_progress: قيد المعالجة
+- closed_inspector: مغلق (مراقب) | pending_enforcement: قيد الإنفاذ
+- pending_notice: قيد الإشعار | unknown_offender: مجهول المخالف
+- quality_review: مراجعة الجودة | closed_final: مغلق نهائياً | rejected: مرفوض
+البلاغات "المفتوحة" = كل ما عدا closed_final و rejected و deleted.
+
+## قواعد استخدام الأدوات
+
+### تحديد العنصر (element_type)
+- إذا ذكر المستخدم اسم عنصر بالعربية مثل "تسوير المباني" أو "حفريات الشوارع" أو "لافتات":
+  1. استدعِ get_element_types أولاً للحصول على قائمة العناصر المتاحة مع معرّفاتها
+  2. طابق الاسم العربي مع القائمة
+  3. إن وجدت تطابقاً واحداً واضحاً: تابع الاستعلام
+  4. إن وجدت تطابقات متعددة: اسأل المستخدم: "هل تقصد [عنصر أ] أم [عنصر ب]؟"
+  5. إن لم تجد أي تطابق: أخبر المستخدم بالعناصر المتاحة
+
+### البلاغ الأول / الأخير / بعينه
+- "البلاغ الأول" أو "أول بلاغ" → استدعِ get_report_detail بـ report_number: "first"
+- "البلاغ الأخير" أو "آخر بلاغ" → استدعِ get_report_detail بـ report_number: "last"
+- رقم بلاغ محدد → استدعِ get_report_detail بـ report_number: الرقم
+- سجل التتبع / التاريخ / الحالات السابقة → استخدم get_report_detail دائماً
+
+### الموظف المحدد
+- عندما يسأل مدير النظام عن موظف بالاسم → استدعِ get_inspector_performance بـ inspector_name: الاسم
+
+## قواعد صارمة
+1. لا تولّد أرقاماً أو بيانات من عندك — استخدم الأدوات دائماً
 2. لا تتجاوز نطاق صلاحيات المستخدم
-3. إذا لم تتوفر بيانات كافية، وضّح ذلك
+3. إذا لم تتوفر بيانات كافية: وضّح ذلك واقترح سؤالاً بديلاً
 4. أنت مساعد تحليلي فقط — القرارات النهائية تعود للمستخدم المختص
 
-بعد جمع البيانات من الأدوات، أعد ردًا بهذا التنسيق حصراً:
+## تنسيق الرد — حصراً
 
 <RESPONSE>
 {
   "text": "نص الرد الكامل بالعربية",
-  "kpis": [
-    {"label": "العنوان", "value": "123", "unit": "بلاغ", "trend": "+15%", "trendUp": true}
-  ],
-  "chart": {
-    "type": "bar",
-    "title": "عنوان الرسم البياني",
-    "data": [{"name": "اسم", "value": 123, "fill": "#3B82F6"}]
-  },
-  "mapCommand": {
-    "action": "filterAndZoom",
-    "params": {"element": "id", "status": "status", "bounds": {"south": 0, "north": 0, "west": 0, "east": 0}, "label": "وصف"}
-  },
-  "table": {
-    "columns": ["العمود1", "العمود2"],
-    "rows": [["قيمة1", "قيمة2"]]
-  }
+  "kpis": [{"label": "العنوان", "value": "123", "unit": "بلاغ", "trend": "+15%", "trendUp": true}],
+  "chart": {"type": "bar", "title": "عنوان", "data": [{"name": "اسم", "value": 123, "fill": "#3B82F6"}]},
+  "mapCommand": {"action": "filterAndZoom", "params": {"element": "id", "status": "status", "bounds": {"south": 0, "north": 0, "west": 0, "east": 0}, "label": "وصف"}},
+  "table": {"columns": ["العمود1", "العمود2"], "rows": [["قيمة1", "قيمة2"]]}
 }
 </RESPONSE>
 
-أنواع mapCommand المتاحة:
-- filterAndZoom: لعرض بلاغات منطقة / نوع عنصر معين على الخريطة
-- showHeatmap: لعرض خريطة حرارية (ضع النقاط في params.points)
-- filterByElement: تصفية الخريطة حسب نوع العنصر فقط
-- focusMunicipality: التركيز على منطقة دون تغيير الفلاتر
-
-ملاحظات التنسيق:
-- استخدم فقط الحقول ذات الصلة؛ ضع null للحقول غير المناسبة
-- chart.type يمكن أن يكون: bar, pie, line
-- ألوان chart.data.fill المقترحة: #3B82F6 (أزرق), #10B981 (أخضر), #EF4444 (أحمر), #F59E0B (برتقالي), #8B5CF6 (بنفسجي)
-- لا تضع بيانات النقاط الكاملة في kpis أو text — ضعها في mapCommand.params أو chart فقط`
+- chart.type: bar | pie | line
+- mapCommand.action: filterAndZoom | showHeatmap | filterByElement | focusMunicipality | highlightReports
+- ألوان مقترحة: #3B82F6 أزرق | #10B981 أخضر | #EF4444 أحمر | #F59E0B برتقالي | #8B5CF6 بنفسجي
+- ضع null للحقول غير المناسبة — لا تضع نقاط الخريطة في text أو kpis`
 }
 
 // ─── Tool executor ────────────────────────────────────────────────────────────
@@ -180,6 +210,10 @@ async function executeTool(name, input, scope) {
         return await getDuplicateStats(scope.type !== 'unrestricted' ? scope.entityId : null)
       case 'get_heatmap_data':
         return await getHeatmapData({ ...input, scope })
+      case 'get_report_detail':
+        return await getReportDetail({ ...input, scope })
+      case 'get_element_types':
+        return await getElementTypes({ scope })
       default:
         return { error: `Unknown tool: ${name}` }
     }
@@ -214,7 +248,7 @@ async function callClaude(messages, systemPrompt) {
     },
     body: JSON.stringify({
       model:      MODEL,
-      max_tokens: 2048,
+      max_tokens: 1400,
       system:     systemPrompt,
       tools:      TOOLS,
       messages,
