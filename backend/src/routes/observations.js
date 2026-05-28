@@ -55,6 +55,7 @@ router.get('/', requirePermission('view_reports'), async (req, res) => {
 
 router.get('/:id', requirePermission('view_reports'), async (req, res) => {
   const layerId = req.params.id
+  const { entityId, role } = req.user
 
   const [layerRes, obsRes] = await Promise.all([
     query(`SELECT * FROM observation_layers WHERE id = $1`, [layerId]),
@@ -71,7 +72,12 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
 
   if (!layerRes.rows.length) return res.status(404).json({ error: 'Layer not found' })
 
-  res.json({ layer: layerRes.rows[0], observations: obsRes.rows })
+  const layer = layerRes.rows[0]
+  if (role !== 'admin' && role !== 'executive' && layer.entity_id && layer.entity_id !== entityId) {
+    return res.status(403).json({ error: 'Forbidden', code: 'ENTITY_MISMATCH' })
+  }
+
+  res.json({ layer, observations: obsRes.rows })
 })
 
 // ─── Upload + import observation file ────────────────────────────────────────

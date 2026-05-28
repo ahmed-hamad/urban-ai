@@ -2,6 +2,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import { requirePermission } from '../middleware/auth.js'
 import { query } from '../services/db.js'
+import { audit } from '../services/audit.js'
 
 const ROLE_DEFAULT_PERMISSIONS = {
   admin:     ['create_report', 'view_reports', 'edit_report', 'assign_report',
@@ -14,14 +15,6 @@ const ROLE_DEFAULT_PERMISSIONS = {
               'view_financials', 'view_audit_log', 'gis_access', 'reset_password'],
   auditor:   ['view_reports', 'quality_review', 'close_final', 'reject_report', 'view_audit_log'],
   monitor:   ['create_report', 'view_reports', 'close_inspector', 'gis_access', 'ai_access'],
-}
-
-async function audit(subjectType, subjectId, action, actor, meta = {}) {
-  await query(
-    `INSERT INTO audit_logs (subject_type, subject_id, action, performed_by, entity_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [subjectType, subjectId, action, actor.id, actor.entityId, JSON.stringify(meta)],
-  )
 }
 
 const router = Router()
@@ -158,6 +151,24 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
   const { rows } = await query(`${USER_SELECT} WHERE u.id = $1`, [targetId])
   if (!rows.length) return res.status(404).json({ error: 'User not found' })
 
+  // Managers may only view users within their entity tree
+  if (actorRole === 'manager' && targetId !== actorId && rows[0].entity_id !== entityId) {
+    const { rows: treeCheck } = await query(
+      `WITH RECURSIVE entity_tree AS (
+         SELECT id FROM entities WHERE id = $1::uuid
+         UNION ALL
+         SELECT e.id FROM entities e
+         INNER JOIN entity_tree et ON e.parent_id = et.id
+         WHERE e.is_active = true
+       )
+       SELECT 1 FROM entity_tree WHERE id = $2::uuid`,
+      [entityId, rows[0].entity_id],
+    )
+    if (!treeCheck.length) {
+      return res.status(403).json({ error: 'Forbidden', code: 'ENTITY_SCOPE_DENIED' })
+    }
+  }
+
   res.json({ user: rows[0] })
 })
 
@@ -174,7 +185,10 @@ router.post('/', requirePermission('manage_users'), async (req, res) => {
     return res.status(403).json({ error: 'Forbidden', code: 'PRIVILEGE_ESCALATION' })
   }
 
-  if (role !== 'admin' && !entityId) {
+  // Managers can only create users within their own entity
+  const effectiveEntityId = (actorRole === 'manager') ? req.user.entityId : entityId
+
+  if (role !== 'admin' && !effectiveEntityId) {
     return res.status(400).json({ error: 'الجهة التنظيمية إلزامية لهذا الدور', code: 'ENTITY_REQUIRED' })
   }
 
@@ -190,10 +204,10 @@ router.post('/', requirePermission('manage_users'), async (req, res) => {
       `INSERT INTO users (full_name, email, role, entity_id, password_hash, avatar, permissions, phone)
        VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8)
        RETURNING id, full_name AS name, email, role, entity_id, status, avatar, join_date, permissions, phone`,
-      [name.trim(), email.toLowerCase().trim(), role, entityId || null, hash, avatar, finalPerms, phone || null],
+      [name.trim(), email.toLowerCase().trim(), role, effectiveEntityId || null, hash, avatar, finalPerms, phone || null],
     )
 
-    await audit('user', user.id, 'created', req.user, { role, entityId })
+    await audit('user', user.id, 'created', req.user, { role, entityId: effectiveEntityId })
     res.status(201).json({ user })
   } catch (err) {
     if (err.code === '23505') {
@@ -205,12 +219,32 @@ router.post('/', requirePermission('manage_users'), async (req, res) => {
 
 // PATCH /api/users/:id — requires manage_users
 router.patch('/:id', requirePermission('manage_users'), async (req, res) => {
-  const { role: actorRole, id: actorId } = req.user
+  const { role: actorRole, entityId: actorEntityId, id: actorId } = req.user
   const targetId = req.params.id
   const { role: newRole, entityId, status, name, password, permissions, phone } = req.body
 
   if (actorRole !== 'admin' && newRole && ['admin', 'executive'].includes(newRole)) {
     return res.status(403).json({ error: 'Forbidden', code: 'PRIVILEGE_ESCALATION' })
+  }
+
+  // Managers may only update users within their entity tree
+  if (actorRole === 'manager' && targetId !== actorId) {
+    const { rows: treeCheck } = await query(
+      `WITH RECURSIVE entity_tree AS (
+         SELECT id FROM entities WHERE id = $1::uuid
+         UNION ALL
+         SELECT e.id FROM entities e
+         INNER JOIN entity_tree et ON e.parent_id = et.id
+         WHERE e.is_active = true
+       )
+       SELECT 1 FROM users u
+       JOIN entity_tree et ON et.id = u.entity_id
+       WHERE u.id = $2::uuid AND u.status != 'inactive'`,
+      [actorEntityId, targetId],
+    )
+    if (!treeCheck.length) {
+      return res.status(403).json({ error: 'Forbidden', code: 'ENTITY_SCOPE_DENIED' })
+    }
   }
 
   const setClauses = ['updated_at = NOW()']

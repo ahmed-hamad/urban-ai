@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { requirePermission, buildReportScope } from '../middleware/auth.js'
 import { query } from '../services/db.js'
+import { audit } from '../services/audit.js'
 import {
   onReportCreated, onReportAssigned, onQualityReviewNeeded,
   onReportRejected, onReportClosed, onInspectorClosed,
@@ -11,15 +12,6 @@ const router = Router()
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const isUUID = (s) => UUID_RE.test(s)
-
-// Local audit helper (mirrors the pattern in ingestion.js)
-async function audit(subjectType, subjectId, action, actor, meta = {}) {
-  await query(
-    `INSERT INTO audit_logs (subject_type, subject_id, action, performed_by, entity_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [subjectType, subjectId, action, actor.id, actor.entityId, JSON.stringify(meta)],
-  )
-}
 
 // GET /api/reports
 // Returns reports from PostgreSQL with RBAC scope enforcement.
@@ -492,7 +484,24 @@ router.post('/:id/batch-close', requirePermission('close_inspector'), async (req
   const { closureType, closureNotes, includeIds = [] } = req.body
   if (!closureType) return res.status(400).json({ error: 'نوع الإغلاق مطلوب', code: 'MISSING_CLOSURE_TYPE' })
 
+  const scope = buildReportScope(req.user)
   const allIds = [req.params.id, ...includeIds.filter(id => id !== req.params.id)]
+
+  // Validate all IDs are valid UUIDs before touching the DB
+  if (allIds.some(id => !isUUID(id))) {
+    return res.status(400).json({ error: 'معرفات البلاغات غير صالحة', code: 'INVALID_REPORT_IDS' })
+  }
+
+  // Build scope-aware WHERE clause so a monitor/manager cannot close reports outside their scope
+  const updateParams = [closureType, closureNotes || null, allIds]
+  let scopeFilter = ''
+  if (scope.type === 'entity') {
+    updateParams.push(scope.entityId)
+    scopeFilter = `AND entity_id = $${updateParams.length}::uuid`
+  } else if (scope.type === 'user') {
+    updateParams.push(scope.userId)
+    scopeFilter = `AND (assigned_to = $${updateParams.length}::uuid OR created_by = $${updateParams.length}::uuid)`
+  }
 
   const { rows: updated } = await query(
     `UPDATE reports
@@ -500,8 +509,9 @@ router.post('/:id/batch-close', requirePermission('close_inspector'), async (req
          closed_at = NOW(), updated_at = NOW()
      WHERE id = ANY($3::uuid[])
        AND status NOT IN ('closed_final', 'rejected', 'deleted')
+       ${scopeFilter}
      RETURNING id, report_number, status`,
-    [closureType, closureNotes || null, allIds],
+    updateParams,
   )
 
   for (const r of updated) {

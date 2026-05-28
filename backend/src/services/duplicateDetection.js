@@ -283,6 +283,18 @@ export async function listDuplicateCandidates({ entityId, status, layerId, limit
 }
 
 export async function getDuplicateStats(entityId) {
+  // When entityId is provided, scope stats to reports belonging to that entity
+  const entityFilter = entityId
+    ? `WHERE (
+         source_report_id  IN (SELECT id FROM reports WHERE entity_id = $1::uuid) OR
+         matched_report_id IN (SELECT id FROM reports WHERE entity_id = $1::uuid) OR
+         source_observation_id IN (
+           SELECT id FROM observations WHERE entity_id = $1::uuid
+         )
+       )`
+    : ''
+  const params = entityId ? [entityId] : []
+
   const [totals, byStatus] = await Promise.all([
     query(
       `SELECT COUNT(*) AS total,
@@ -290,12 +302,16 @@ export async function getDuplicateStats(entityId) {
               COUNT(*) FILTER (WHERE status = 'confirmed_duplicate') AS confirmed,
               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected,
               AVG(confidence) AS avg_confidence
-       FROM duplicate_candidates`,
+       FROM duplicate_candidates
+       ${entityFilter}`,
+      params,
     ),
     query(
       `SELECT status, COUNT(*) AS count
        FROM duplicate_candidates
+       ${entityFilter}
        GROUP BY status`,
+      params,
     ),
   ])
   return {

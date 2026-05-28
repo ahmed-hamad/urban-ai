@@ -31,7 +31,7 @@ app.use('/api/auth', authRouter)
 // Protected routes — RBAC enforced inside each router
 app.use('/api/reports', authMiddleware, reportsRouter)
 app.use('/api/users', authMiddleware, usersRouter)
-app.use('/api/violations', violationsRouter)
+app.use('/api/violations', authMiddleware, violationsRouter)
 app.use('/api/ingestion', authMiddleware, ingestionRouter)
 app.use('/api/observations', authMiddleware, observationsRouter)
 app.use('/api/duplicates', authMiddleware, duplicatesRouter)
