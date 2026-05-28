@@ -6,9 +6,10 @@ import {
 } from 'recharts'
 import { useAuth } from '@/context/AuthContext'
 import { useMapContext } from '@/context/MapContext'
+import { useChatSession } from '@/hooks/useChatSession'
 import {
   Shield, AlertCircle, Map, TrendingUp, TrendingDown, Minus,
-  Loader2, Zap, Bot,
+  Loader2, Zap, Bot, Copy, Check,
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
@@ -113,25 +114,26 @@ function renderText(text) {
   })
 }
 
+// ─── Welcome message (stable module-level constant) ───────────────────────────
+const AGENT_WELCOME_MSG = {
+  role: 'assistant',
+  text: `مرحباً! أنا المساعد المكاني الذكي لمنصة UrbanAI.\n\nأقرأ بيانات حقيقية من قاعدة البيانات وأقدم تحليلات مكانية وتشغيلية متقدمة.\n\nيمكنني مساعدتك في:\n- **إحصاءات البلاغات** والأداء التشغيلي\n- **التحليل المكاني** وعرض النتائج على الخريطة\n- **التحليل المالي** وتوقعات الغرامات\n- **أداء المراقبين** والجهات\n- **تحليل التكرار** بين مصادر الرصد\n\n⚠️ المساعد يقترح تحليلات فقط. القرارات النهائية تعود للمستخدم المختص.`,
+  timestamp: null,
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function AgentAI() {
   const { user, authFetch } = useAuth()
   const { applyMapCommand } = useMapContext()
   const navigate = useNavigate()
 
-  const [messages, setMessages] = useState([{
-    role: 'assistant',
-    text: `مرحباً! أنا المساعد المكاني الذكي لمنصة UrbanAI.\n\nأقرأ بيانات حقيقية من قاعدة البيانات وأقدم تحليلات مكانية وتشغيلية متقدمة.\n\nيمكنني مساعدتك في:\n- **إحصاءات البلاغات** والأداء التشغيلي\n- **التحليل المكاني** وعرض النتائج على الخريطة\n- **التحليل المالي** وتوقعات الغرامات\n- **أداء المراقبين** والجهات\n- **تحليل التكرار** بين مصادر الرصد\n\n⚠️ المساعد يقترح تحليلات فقط. القرارات النهائية تعود للمستخدم المختص.`,
-    timestamp: new Date(),
-  }])
-  const [input, setInput]     = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError]     = useState(null)
+  const [messages, setMessages, clearMessages, historyRef] = useChatSession('agent', AGENT_WELCOME_MSG)
+  const [input, setInput]         = useState('')
+  const [loading, setLoading]     = useState(false)
+  const [error, setError]         = useState(null)
+  const [copiedKey, setCopiedKey] = useState(null)
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
-
-  // Keep last 6 messages as conversation history for multi-turn context
-  const historyRef = useRef([])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -208,6 +210,13 @@ export default function AgentAI() {
     }
   }, [input, loading, authFetch, applyMapCommand])
 
+  const copyData = useCallback((key, text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedKey(key)
+      setTimeout(() => setCopiedKey(null), 2000)
+    })
+  }, [])
+
   return (
     <div className="flex gap-5 h-[calc(100vh-130px)]">
 
@@ -253,6 +262,12 @@ export default function AgentAI() {
             ))}
           </div>
         </div>
+
+        {/* Clear conversation */}
+        <button onClick={clearMessages}
+          className="w-full text-right text-xs text-gray-500 hover:text-red-400 border border-gray-700/40 hover:border-red-500/30 rounded-xl px-3 py-2 transition-all">
+          مسح المحادثة
+        </button>
 
         {/* Governance notice */}
         <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 space-y-1.5">
@@ -307,7 +322,15 @@ export default function AgentAI() {
                 {/* Chart */}
                 {msg.chart && (
                   <div className="bg-gray-800 border border-gray-700/50 rounded-2xl p-4 w-full">
-                    <p className="text-xs font-medium text-gray-400 mb-3">{msg.chart.title}</p>
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-xs font-medium text-gray-400">{msg.chart.title}</p>
+                      <button
+                        onClick={() => copyData(`${i}-chart`, [msg.chart.title, ...msg.chart.data.map(d => `${d.name}\t${d.value}`)].join('\n'))}
+                        className="p-1 rounded hover:bg-gray-700 transition-colors flex-shrink-0"
+                        title="نسخ البيانات">
+                        {copiedKey === `${i}-chart` ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} className="text-gray-500" />}
+                      </button>
+                    </div>
                     {msg.chart.type === 'bar' && (
                       <ResponsiveContainer width="100%" height={180}>
                         <BarChart data={msg.chart.data}>
@@ -347,7 +370,16 @@ export default function AgentAI() {
 
                 {/* Data table */}
                 {msg.table?.columns?.length > 0 && (
-                  <div className="w-full">
+                  <div className="w-full space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-500">جدول البيانات</span>
+                      <button
+                        onClick={() => copyData(`${i}-table`, [msg.table.columns.join('\t'), ...msg.table.rows.map(r => r.join('\t'))].join('\n'))}
+                        className="p-1 rounded hover:bg-gray-700 transition-colors"
+                        title="نسخ الجدول">
+                        {copiedKey === `${i}-table` ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} className="text-gray-500" />}
+                      </button>
+                    </div>
                     <DataTable columns={msg.table.columns} rows={msg.table.rows} />
                   </div>
                 )}

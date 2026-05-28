@@ -10,7 +10,7 @@ import {
 import {
   Bot, FileText, TrendingUp, TrendingDown, Minus,
   ChevronRight, ChevronLeft, Send, Layers, Plus, Lock,
-  Loader2, Map, Zap,
+  Loader2, Map, Zap, Copy, Check,
 } from 'lucide-react'
 import { statusConfig } from '@/data/mockData'
 import { OPEN_STATUSES } from '@/data/caseConfig'
@@ -18,6 +18,7 @@ import { useReportScope } from '@/hooks/useReportScope'
 import { useApiReports, normalizeApiReport } from '@/hooks/useApiReports'
 import { useAuth } from '@/context/AuthContext'
 import { useMapContext } from '@/context/MapContext'
+import { useChatSession } from '@/hooks/useChatSession'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 const createIcon = (color) => L.divIcon({
@@ -113,18 +114,20 @@ const Tip = ({ active, payload, label }) => active && payload?.length ? (
 ) : null
 
 // ─── AI Panel (unified — calls backend /api/assistant/query) ─────────────────
+const DASHBOARD_AI_WELCOME = {
+  role: 'assistant',
+  text: 'مرحباً! أنا المساعد المكاني الذكي.\nأقرأ بيانات حقيقية من قاعدة البيانات وأتحكم في خريطة لوحة التحكم مباشرة.',
+}
+
 function AIPanel() {
   const { authFetch } = useAuth()
   const { applyMapCommand } = useMapContext()
 
-  const [msgs, setMsgs] = useState([{
-    role: 'ai',
-    text: 'مرحباً! أنا المساعد المكاني الذكي.\nأقرأ بيانات حقيقية من قاعدة البيانات وأتحكم في خريطة لوحة التحكم مباشرة.',
-  }])
-  const [input, setInput]     = useState('')
-  const [loading, setLoading] = useState(false)
-  const historyRef = useRef([])
-  const endRef     = useRef(null)
+  const [msgs, setMsgs, clearMsgs, historyRef] = useChatSession('dashboard', DASHBOARD_AI_WELCOME)
+  const [input, setInput]         = useState('')
+  const [loading, setLoading]     = useState(false)
+  const [copiedKey, setCopiedKey] = useState(null)
+  const endRef = useRef(null)
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
 
@@ -137,7 +140,7 @@ function AIPanel() {
     setLoading(true)
 
     const history = historyRef.current.slice(-6).map(m => ({
-      role:    m.role === 'ai' ? 'assistant' : 'user',
+      role:    m.role,
       content: m.text,
     }))
 
@@ -158,22 +161,29 @@ function AIPanel() {
       if (data.mapCommand) applyMapCommand(data.mapCommand)
 
       setMsgs(p => [...p, {
-        role: 'ai', text: data.text || '',
+        role: 'assistant', text: data.text || '',
         chart: data.chart, kpis: data.kpis,
         table: data.table, mapCommand: data.mapCommand,
       }])
 
       historyRef.current = [
         ...historyRef.current,
-        { role: 'user', text: q },
-        { role: 'ai',   text: data.text || '' },
+        { role: 'user',      text: q },
+        { role: 'assistant', text: data.text || '' },
       ].slice(-12)
 
     } catch (err) {
-      setMsgs(p => [...p, { role: 'ai', text: `⚠️ ${err.message}` }])
+      setMsgs(p => [...p, { role: 'assistant', text: `⚠️ ${err.message}` }])
     }
     setLoading(false)
   }, [input, loading, authFetch, applyMapCommand])
+
+  const copyData = useCallback((key, text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedKey(key)
+      setTimeout(() => setCopiedKey(null), 2000)
+    })
+  }, [])
 
   const renderText = (text) => {
     if (!text) return null
@@ -217,14 +227,14 @@ function AIPanel() {
       <div className="flex-1 overflow-y-auto px-3 pb-2 space-y-3">
         {msgs.map((m, i) => (
           <div key={i} className={`flex gap-2 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
-            <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${m.role === 'ai' ? 'bg-blue-600' : 'bg-slate-200 dark:bg-gray-700'}`}>
-              {m.role === 'ai' ? <Bot size={12} className="text-white" /> : <span className="text-xs text-slate-600 dark:text-white">أ</span>}
+            <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${m.role === 'assistant' ? 'bg-blue-600' : 'bg-slate-200 dark:bg-gray-700'}`}>
+              {m.role === 'assistant' ? <Bot size={12} className="text-white" /> : <span className="text-xs text-slate-600 dark:text-white">أ</span>}
             </div>
             <div className={`flex-1 min-w-0 space-y-2 ${m.role === 'user' ? 'items-end flex flex-col' : ''}`}>
 
               {/* Bubble */}
-              <div className={`rounded-xl p-3 ${m.role === 'ai' ? 'bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700' : 'bg-blue-600'}`}>
-                {m.role === 'ai'
+              <div className={`rounded-xl p-3 ${m.role === 'assistant' ? 'bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700' : 'bg-blue-600'}`}>
+                {m.role === 'assistant'
                   ? <div className="space-y-0.5">{renderText(m.text)}</div>
                   : <p className="text-xs text-white">{m.text}</p>}
               </div>
@@ -257,7 +267,15 @@ function AIPanel() {
               {/* Chart (compact height) */}
               {m.chart && (
                 <div className="bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-xl p-3 w-full">
-                  <p className="text-xs font-medium text-slate-500 dark:text-gray-400 mb-2 truncate">{m.chart.title}</p>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-medium text-slate-500 dark:text-gray-400 truncate">{m.chart.title}</p>
+                    <button
+                      onClick={() => copyData(`${i}-chart`, [m.chart.title, ...m.chart.data.map(d => `${d.name}\t${d.value}`)].join('\n'))}
+                      className="p-1 rounded hover:bg-slate-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0 mr-1"
+                      title="نسخ البيانات">
+                      {copiedKey === `${i}-chart` ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} className="text-slate-400 dark:text-gray-500" />}
+                    </button>
+                  </div>
                   {m.chart.type === 'bar' && (
                     <ResponsiveContainer width="100%" height={140}>
                       <BarChart data={m.chart.data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
@@ -293,6 +311,41 @@ function AIPanel() {
                       </LineChart>
                     </ResponsiveContainer>
                   )}
+                </div>
+              )}
+
+              {/* Data table */}
+              {m.table?.columns?.length > 0 && (
+                <div className="w-full space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-400 dark:text-gray-500">جدول البيانات</span>
+                    <button
+                      onClick={() => copyData(`${i}-table`, [m.table.columns.join('\t'), ...m.table.rows.map(r => r.join('\t'))].join('\n'))}
+                      className="p-1 rounded hover:bg-slate-200 dark:hover:bg-gray-700 transition-colors"
+                      title="نسخ الجدول">
+                      {copiedKey === `${i}-table` ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} className="text-slate-400 dark:text-gray-500" />}
+                    </button>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-gray-700">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-200 dark:border-gray-700 bg-slate-100 dark:bg-gray-800">
+                          {m.table.columns.map((col, j) => (
+                            <th key={j} className="text-right px-2 py-1.5 text-slate-500 dark:text-gray-400 font-medium">{col}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {m.table.rows.map((row, j) => (
+                          <tr key={j} className="border-b border-slate-100 dark:border-gray-700/50 last:border-0 hover:bg-slate-50 dark:hover:bg-gray-800/50">
+                            {row.map((cell, k) => (
+                              <td key={k} className="px-2 py-1.5 text-slate-600 dark:text-gray-300">{cell}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 

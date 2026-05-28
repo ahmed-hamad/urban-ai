@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback } from 'react'
+import { clearChatSession } from '@/hooks/useChatSession'
 
 const AuthContext = createContext()
 
@@ -26,9 +27,10 @@ export function AuthProvider({ children }) {
   }
 
   const logout = useCallback(() => {
+    clearChatSession(user?.id)
     setUser(null)
     localStorage.removeItem('urban-user')
-  }, [])
+  }, [user?.id])
 
   const loginWithPassword = async (email, password) => {
     try {
