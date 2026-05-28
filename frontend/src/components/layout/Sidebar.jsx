@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import {
   LayoutDashboard, ClipboardList, MapPin, TrendingUp,
   Users, Shield, ChevronRight, ChevronLeft, FileText, ScanSearch, LogOut, Circle, Network,
-  Inbox, Layers, ListChecks, Eye, GitMerge,
+  Inbox, Layers, ListChecks, Eye, GitMerge, Bot,
 } from 'lucide-react'
 import { useData } from '@/context/DataContext'
 import { useReportScope } from '@/hooks/useReportScope'
@@ -13,7 +13,8 @@ import { OPEN_STATUSES } from '@/data/caseConfig'
 
 // allowedRoles: null = all authenticated roles; array = restricted
 const NAV_ITEMS = [
-  { path: '/',           label: 'لوحة التحكم',      Icon: LayoutDashboard, desc: 'النظرة العامة + المساعد الذكي', allowedRoles: null },
+  { path: '/',           label: 'لوحة التحكم',      Icon: LayoutDashboard, desc: 'النظرة العامة',                  allowedRoles: null },
+  { path: '/agent',      label: 'المساعد الذكي',    Icon: Bot,             desc: 'تحليل مكاني · Claude + PostGIS', allowedRoles: null },
   { path: '/reports',    label: 'سلة البلاغات',     Icon: ClipboardList,   desc: 'إدارة البلاغات',               badgeKey: 'openReports', allowedRoles: null },
   { path: '/map',        label: 'الخريطة الذكية',   Icon: MapPin,          desc: 'GIS · خرائط حرارية',           allowedRoles: null },
   { path: '/analyze',    label: 'تحليل المرئيات',   Icon: ScanSearch,      desc: 'رصد بالذكاء الاصطناعي',       allowedRoles: null },

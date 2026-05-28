@@ -93,7 +93,7 @@ export async function getReportStats({ period, group_by, status, element_type, s
 
 // ─── Inspector / Monitor Performance ─────────────────────────────────────────
 
-export async function getInspectorPerformance({ period, entity_name, top_n = 10, scope } = {}) {
+export async function getInspectorPerformance({ period, entity_name, inspector_name, top_n = 10, scope } = {}) {
   const params = []
   const where  = [`r.status != 'deleted'`, `r.assigned_to IS NOT NULL`]
 
@@ -103,6 +103,11 @@ export async function getInspectorPerformance({ period, entity_name, top_n = 10,
   if (entity_name) {
     params.push(`%${entity_name}%`)
     where.push(`e.name ILIKE $${params.length}`)
+  }
+
+  if (inspector_name) {
+    params.push(`%${inspector_name}%`)
+    where.push(`u.full_name ILIKE $${params.length}`)
   }
 
   params.push(Math.min(Number(top_n) || 10, 50))

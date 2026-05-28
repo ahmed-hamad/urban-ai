@@ -1,14 +1,23 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet'
+import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet'
 import MarkerClusterGroup from 'react-leaflet-cluster'
 import L from 'leaflet'
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
-import { Bot, FileText, TrendingUp, ChevronRight, ChevronLeft, Send, Layers, Plus, Settings, X, KeyRound, Lock } from 'lucide-react'
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
+  CartesianGrid, LineChart, Line, PieChart, Pie,
+} from 'recharts'
+import {
+  Bot, FileText, TrendingUp, TrendingDown, Minus,
+  ChevronRight, ChevronLeft, Send, Layers, Plus, Lock,
+  Loader2, Map, Zap,
+} from 'lucide-react'
 import { statusConfig } from '@/data/mockData'
 import { OPEN_STATUSES } from '@/data/caseConfig'
 import { useReportScope } from '@/hooks/useReportScope'
 import { useApiReports, normalizeApiReport } from '@/hooks/useApiReports'
+import { useAuth } from '@/context/AuthContext'
+import { useMapContext } from '@/context/MapContext'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 const createIcon = (color) => L.divIcon({
@@ -21,101 +30,22 @@ const statusLabels = {
   in_progress: 'قيد المعالجة', closed: 'مغلق', rejected: 'مرفوض',
 }
 
-// ─── Claude API integration ──────────────────────────────────────────────────
+// ─── Dashboard AI suggestions ─────────────────────────────────────────────────
 const AI_SUGGESTIONS = [
-  'ما أكثر عناصر التشوه البصري المرصودة؟',
-  'ما هو إجمالي التوقع المالي للغرامات؟',
-  'كيف أداء الجهات المسؤولة؟',
-  'ما توزيع البلاغات على المناطق؟',
-  'كم نسبة البلاغات المغلقة؟',
+  'ما ملخص البلاغات لهذا الشهر؟',
+  'اعرض بلاغات حفريات الشوارع على الخريطة',
+  'قارن أداء المراقبين هذا الربع',
+  'اعرض خريطة كثافة البلاغات',
 ]
 
-function buildSystemPrompt(stats, reports) {
-  const topElements = stats.byElement.slice(0, 5).map(e => `  - ${e.name}: ${e.count} بلاغ (غرامة ${e.fine.toLocaleString('ar-SA')} ر.س)`).join('\n')
-  const topDistricts = stats.byDistrict.slice(0, 5).map(d => `  - ${d.district}: ${d.count} بلاغ`).join('\n')
-  const topEntities = stats.byEntity.slice(0, 5).map(e => `  - ${e.dept}: نسبة إغلاق ${e.rate}%`).join('\n')
-  const byStatus = stats.byStatus.map(s => `  - ${statusLabels[s.status] || s.status}: ${s.count}`).join('\n')
-
-  return `أنت مساعد ذكاء اصطناعي متخصص في تحليل بيانات منصة رصد التشوه البصري لأمانة الباحة. أجب بالعربية دائماً بأسلوب مختصر ومهني بناءً على البيانات التالية فقط.
-
-## بيانات النظام الحالية (Real-time):
-- إجمالي البلاغات: ${stats.totalReports}
-- مفتوحة: ${stats.openReports}
-- مغلقة: ${stats.closedReports}
-- جديدة: ${stats.newReports}
-- رُصد بالذكاء الاصطناعي: ${stats.aiDetected}
-- إجمالي الغرامات المتوقعة: ${stats.totalFineEstimate.toLocaleString('ar-SA')} ر.س
-- متوسط وقت الإغلاق: ${stats.avgCloseTime} أيام
-
-## توزيع حسب الحالة:
-${byStatus || '  - لا يوجد'}
-
-## أكثر العناصر رصداً:
-${topElements || '  - لا يوجد بعد'}
-
-## توزيع حسب المنطقة:
-${topDistricts || '  - لا يوجد بعد'}
-
-## أداء الجهات:
-${topEntities || '  - لا يوجد إسناد بعد'}
-
-لا تخترع بيانات. إذا كانت البيانات فارغة فأخبر المستخدم بذلك بوضوح.`
-}
-
-async function callClaudeAPI(apiKey, systemPrompt, question) {
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: question }],
-    }),
-  })
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}))
-    throw new Error(err?.error?.message || `HTTP ${resp.status}`)
-  }
-  const data = await resp.json()
-  return data.content?.[0]?.text || ''
-}
-
-function localFallback(q, stats) {
-  const text = q.toLowerCase()
-  if (stats.totalReports === 0) {
-    return 'لا توجد بلاغات في النظام حتى الآن.\nقم بإضافة أول بلاغ من زر **"بلاغ جديد"** في الأعلى.'
-  }
-  if (text.includes('مفتوح') || text.includes('نسبة')) {
-    return `البلاغات المفتوحة: **${stats.openReports}** من ${stats.totalReports}\nنسبة الإغلاق: ${Math.round(stats.closedReports / stats.totalReports * 100)}%`
-  }
-  if (text.includes('أكثر') || text.includes('عنصر')) {
-    const top = stats.byElement.slice(0, 5)
-    return top.length > 0
-      ? `أكثر العناصر رصداً:\n${top.map((e, i) => `${i + 1}. ${e.name}: **${e.count}** بلاغ`).join('\n')}`
-      : 'لا توجد بيانات كافية بعد.'
-  }
-  if (text.includes('مالي') || text.includes('غرام')) {
-    return `التوقع المالي:\n- إجمالي: **${stats.totalFineEstimate.toLocaleString('ar-SA')} ر.س**\n- متوسط لكل بلاغ: **${Math.round(stats.totalFineEstimate / stats.totalReports).toLocaleString('ar-SA')} ر.س**`
-  }
-  if (text.includes('منطقة') || text.includes('حي')) {
-    const top = stats.byDistrict.slice(0, 5)
-    return top.length > 0
-      ? `توزيع البلاغات على المناطق:\n${top.map((d, i) => `${i + 1}. ${d.district}: **${d.count}** بلاغ`).join('\n')}`
-      : 'لم يتم تحديد مناطق بعد.'
-  }
-  if (text.includes('أداء') || text.includes('جهة') || text.includes('بلدية')) {
-    const top = stats.byEntity.slice(0, 5)
-    return top.length > 0
-      ? `أداء الجهات:\n${top.map((e, i) => `${i + 1}. ${e.dept}: **${e.rate}%** إغلاق`).join('\n')}`
-      : 'لم يتم إسناد بلاغات لجهات بعد.'
-  }
-  return `ملخص المنصة:\n- إجمالي البلاغات: **${stats.totalReports}**\n- المفتوحة: **${stats.openReports}**\n- المغلقة: **${stats.closedReports}**\n- التوقع المالي: **${stats.totalFineEstimate.toLocaleString('ar-SA')} ر.س**`
+// ─── Viewport controller (inside MapContainer) ───────────────────────────────
+function FitBoundsController({ bounds }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!bounds) return
+    map.fitBounds([[bounds.south, bounds.west], [bounds.north, bounds.east]], { padding: [30, 30], animate: true })
+  }, [bounds, map])
+  return null
 }
 
 // Derives the same stats shape as DataContext but from an arbitrary reports slice
@@ -182,133 +112,100 @@ const Tip = ({ active, payload, label }) => active && payload?.length ? (
   </div>
 ) : null
 
-// ─── AI Panel ────────────────────────────────────────────────────────────────
-function AIPanel({ stats, reports }) {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('ua_claude_key') || '')
-  const [showSettings, setShowSettings] = useState(false)
-  const [keyInput, setKeyInput] = useState('')
+// ─── AI Panel (unified — calls backend /api/assistant/query) ─────────────────
+function AIPanel() {
+  const { authFetch } = useAuth()
+  const { applyMapCommand } = useMapContext()
+
   const [msgs, setMsgs] = useState([{
     role: 'ai',
-    text: 'مرحباً، أنا المساعد الذكي للمنصة.\nيمكنني تحليل البلاغات الفعلية، الغرامات، والأداء بلغة طبيعية.',
+    text: 'مرحباً! أنا المساعد المكاني الذكي.\nأقرأ بيانات حقيقية من قاعدة البيانات وأتحكم في خريطة لوحة التحكم مباشرة.',
   }])
-  const [input, setInput] = useState('')
+  const [input, setInput]     = useState('')
   const [loading, setLoading] = useState(false)
-  const endRef = useRef(null)
+  const historyRef = useRef([])
+  const endRef     = useRef(null)
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
 
-  const saveKey = () => {
-    const k = keyInput.trim()
-    if (k) {
-      localStorage.setItem('ua_claude_key', k)
-      setApiKey(k)
-    }
-    setShowSettings(false)
-    setKeyInput('')
-  }
-
-  const clearKey = () => {
-    localStorage.removeItem('ua_claude_key')
-    setApiKey('')
-    setKeyInput('')
-    setShowSettings(false)
-  }
-
-  const send = async (text) => {
-    const q = text || input.trim()
+  const send = useCallback(async (text) => {
+    const q = (text || input).trim()
     if (!q || loading) return
+
     setMsgs(p => [...p, { role: 'user', text: q }])
     setInput('')
     setLoading(true)
+
+    const history = historyRef.current.slice(-6).map(m => ({
+      role:    m.role === 'ai' ? 'assistant' : 'user',
+      content: m.text,
+    }))
+
     try {
-      let responseText
-      if (apiKey) {
-        const systemPrompt = buildSystemPrompt(stats, reports)
-        responseText = await callClaudeAPI(apiKey, systemPrompt, q)
-      } else {
-        await new Promise(r => setTimeout(r, 400 + Math.random() * 300))
-        responseText = localFallback(q, stats)
+      const res = await authFetch('/api/assistant/query', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ message: q, history }),
+      })
+
+      if (!res?.ok) {
+        const d = await res?.json().catch(() => ({}))
+        throw new Error(d?.error || `خطأ (${res?.status})`)
       }
-      setMsgs(p => [...p, { role: 'ai', text: responseText }])
+
+      const data = await res.json()
+
+      if (data.mapCommand) applyMapCommand(data.mapCommand)
+
+      setMsgs(p => [...p, {
+        role: 'ai', text: data.text || '',
+        chart: data.chart, kpis: data.kpis,
+        table: data.table, mapCommand: data.mapCommand,
+      }])
+
+      historyRef.current = [
+        ...historyRef.current,
+        { role: 'user', text: q },
+        { role: 'ai',   text: data.text || '' },
+      ].slice(-12)
+
     } catch (err) {
-      setMsgs(p => [...p, { role: 'ai', text: `حدث خطأ: ${err.message}` }])
+      setMsgs(p => [...p, { role: 'ai', text: `⚠️ ${err.message}` }])
     }
     setLoading(false)
+  }, [input, loading, authFetch, applyMapCommand])
+
+  const renderText = (text) => {
+    if (!text) return null
+    return text.split('\n').map((line, i) => {
+      if (!line.trim()) return <br key={i} />
+      if (line.includes('**')) {
+        const parts = line.split(/\*\*(.*?)\*\*/g)
+        return (
+          <p key={i} className="text-xs leading-relaxed text-slate-600 dark:text-gray-300">
+            {parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-slate-800 dark:text-white">{p}</strong> : p)}
+          </p>
+        )
+      }
+      if (line.startsWith('⚠️') || line.startsWith('ℹ️'))
+        return <p key={i} className="text-xs text-amber-600 dark:text-amber-400 leading-relaxed">{line}</p>
+      return <p key={i} className="text-xs leading-relaxed text-slate-600 dark:text-gray-300">{line}</p>
+    })
   }
 
-  const renderText = (text) => text.split('\n').map((line, i) => {
-    if (!line.trim()) return <br key={i} />
-    const parts = line.split(/\*\*(.*?)\*\*/g)
-    return (
-      <p key={i} className="text-xs leading-relaxed text-slate-600 dark:text-gray-300">
-        {parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-slate-800 dark:text-white">{p}</strong> : p)}
-      </p>
-    )
-  })
-
   return (
-    <div className="flex flex-col h-full relative">
-      {/* Settings modal */}
-      {showSettings && (
-        <div className="absolute inset-0 z-10 bg-white dark:bg-gray-900 flex flex-col p-4 gap-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <KeyRound size={14} className="text-blue-600" />
-              <span className="text-sm font-semibold text-slate-800 dark:text-white">Claude API Key</span>
-            </div>
-            <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-white">
-              <X size={16} />
-            </button>
-          </div>
-          <p className="text-xs text-slate-500 dark:text-gray-400 leading-relaxed">
-            {'أدخل مفتاح Claude API لتفعيل المساعد الذكي بالكامل. يُخزّن في المتصفح فقط ولا يغادر الجهاز.'}
-          </p>
-          <input
-            type="password"
-            value={keyInput}
-            onChange={e => setKeyInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') saveKey() }}
-            placeholder="sk-ant-..."
-            className="bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-2.5 text-xs text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
-          />
-          <div className="flex gap-2">
-            <button onClick={saveKey} disabled={!keyInput.trim()}
-              className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-lg py-2 text-xs font-medium transition-colors">
-              {'حفظ'}
-            </button>
-            {apiKey && (
-              <button onClick={clearKey}
-                className="flex-1 border border-red-200 dark:border-red-500/30 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg py-2 text-xs font-medium transition-colors">
-                {'حذف المفتاح'}
-              </button>
-            )}
-          </div>
-          {apiKey && (
-            <p className="text-xs text-emerald-600 dark:text-emerald-400 text-center">
-              {'✓ مفتاح محفوظ — Claude AI مفعّل'}
-            </p>
-          )}
+    <div className="flex flex-col h-full">
+      {/* Engine badge */}
+      <div className="px-3 pt-3 pb-2 flex-shrink-0">
+        <div className="flex items-center gap-1.5 bg-blue-50 dark:bg-blue-500/10 border border-blue-100 dark:border-blue-500/20 rounded-lg px-2.5 py-1.5">
+          <Zap size={10} className="text-blue-500" />
+          <span className="text-xs text-blue-600 dark:text-blue-400">Claude Sonnet · PostGIS · RBAC</span>
         </div>
-      )}
-
-      {/* Header */}
-      <div className="p-3 border-b border-slate-100 dark:border-gray-800 flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${apiKey ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-gray-600'}`} />
-          <span className="text-xs text-slate-500 dark:text-gray-400">
-            {apiKey ? 'Claude AI' : 'تحليل محلي'}
-          </span>
-        </div>
-        <button onClick={() => { setKeyInput(''); setShowSettings(true) }}
-          className="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors p-1 rounded-md hover:bg-slate-100 dark:hover:bg-gray-800">
-          <Settings size={13} />
-        </button>
       </div>
 
       {/* Suggestions */}
-      <div className="p-3 border-b border-slate-100 dark:border-gray-800 space-y-1.5 flex-shrink-0">
-        <p className="text-xs text-slate-400 dark:text-gray-500 font-medium mb-2">{'أسئلة مقترحة'}</p>
-        {AI_SUGGESTIONS.slice(0, 4).map((q, i) => (
+      <div className="px-3 pb-2 space-y-1.5 flex-shrink-0">
+        {AI_SUGGESTIONS.map((q, i) => (
           <button key={i} onClick={() => send(q)} disabled={loading}
             className="w-full text-right text-xs text-slate-600 dark:text-gray-400 hover:text-slate-800 dark:hover:text-white bg-slate-50 dark:bg-gray-800 hover:bg-slate-100 dark:hover:bg-gray-700 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-2 transition-colors leading-relaxed disabled:opacity-50">
             {q}
@@ -317,26 +214,111 @@ function AIPanel({ stats, reports }) {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      <div className="flex-1 overflow-y-auto px-3 pb-2 space-y-3">
         {msgs.map((m, i) => (
           <div key={i} className={`flex gap-2 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
-            <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold ${m.role === 'ai' ? 'bg-blue-600 text-white' : 'bg-slate-200 dark:bg-gray-700 text-slate-600 dark:text-white'}`}>
-              {m.role === 'ai' ? <Bot size={12} /> : 'أ'}
+            <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${m.role === 'ai' ? 'bg-blue-600' : 'bg-slate-200 dark:bg-gray-700'}`}>
+              {m.role === 'ai' ? <Bot size={12} className="text-white" /> : <span className="text-xs text-slate-600 dark:text-white">أ</span>}
             </div>
-            <div className={`flex-1 max-w-[90%] ${m.role === 'user' ? 'items-end flex flex-col' : ''}`}>
-              <div className={`rounded-xl p-3 ${m.role === 'ai' ? 'bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700' : 'bg-blue-600 text-white'}`}>
+            <div className={`flex-1 min-w-0 space-y-2 ${m.role === 'user' ? 'items-end flex flex-col' : ''}`}>
+
+              {/* Bubble */}
+              <div className={`rounded-xl p-3 ${m.role === 'ai' ? 'bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700' : 'bg-blue-600'}`}>
                 {m.role === 'ai'
                   ? <div className="space-y-0.5">{renderText(m.text)}</div>
-                  : <p className="text-xs">{m.text}</p>}
+                  : <p className="text-xs text-white">{m.text}</p>}
               </div>
+
+              {/* KPI cards (compact 2-col) */}
+              {m.kpis?.length > 0 && (
+                <div className="grid grid-cols-2 gap-1.5 w-full">
+                  {m.kpis.map((kpi, j) => {
+                    const TIcon = kpi.trendUp === true ? TrendingUp : kpi.trendUp === false ? TrendingDown : Minus
+                    const tColor = kpi.trendUp === true ? 'text-emerald-500' : kpi.trendUp === false ? 'text-red-500' : 'text-slate-400'
+                    return (
+                      <div key={j} className="bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg p-2">
+                        <p className="text-xs text-slate-400 dark:text-gray-500 leading-tight mb-1 truncate">{kpi.label}</p>
+                        <p className="text-sm font-bold text-slate-800 dark:text-white leading-none">
+                          {typeof kpi.value === 'number' ? Number(kpi.value).toLocaleString('ar-SA') : kpi.value}
+                          {kpi.unit && <span className="text-xs font-normal text-slate-400 mr-0.5">{kpi.unit}</span>}
+                        </p>
+                        {kpi.trend && (
+                          <div className={`flex items-center gap-0.5 mt-1 ${tColor}`}>
+                            <TIcon size={9} />
+                            <span className="text-xs">{kpi.trend}</span>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Chart (compact height) */}
+              {m.chart && (
+                <div className="bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-xl p-3 w-full">
+                  <p className="text-xs font-medium text-slate-500 dark:text-gray-400 mb-2 truncate">{m.chart.title}</p>
+                  {m.chart.type === 'bar' && (
+                    <ResponsiveContainer width="100%" height={140}>
+                      <BarChart data={m.chart.data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                        <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 9 }} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fill: '#94a3b8', fontSize: 9 }} axisLine={false} tickLine={false} />
+                        <Tooltip content={<Tip />} />
+                        <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+                          {m.chart.data.map((d, j) => <Cell key={j} fill={d.fill || '#3B82F6'} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                  {m.chart.type === 'pie' && (
+                    <ResponsiveContainer width="100%" height={140}>
+                      <PieChart>
+                        <Pie data={m.chart.data} cx="50%" cy="50%" outerRadius={55} innerRadius={22} dataKey="value"
+                          label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false}>
+                          {m.chart.data.map((d, j) => <Cell key={j} fill={d.fill || d.color || '#3B82F6'} />)}
+                        </Pie>
+                        <Tooltip content={<Tip />} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  )}
+                  {m.chart.type === 'line' && (
+                    <ResponsiveContainer width="100%" height={140}>
+                      <LineChart data={m.chart.data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                        <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 9 }} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fill: '#94a3b8', fontSize: 9 }} axisLine={false} tickLine={false} />
+                        <Tooltip content={<Tip />} />
+                        <Line type="monotone" dataKey="value" stroke="#3B82F6" strokeWidth={2} dot={{ fill: '#3B82F6', r: 2 }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              )}
+
+              {/* Map button — zooms/filters THIS page's map, no navigation */}
+              {m.mapCommand && (
+                <button onClick={() => applyMapCommand(m.mapCommand)}
+                  className="flex items-center gap-1.5 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 rounded-lg px-3 py-1.5 transition-all hover:bg-blue-100 dark:hover:bg-blue-500/20">
+                  <Map size={11} />
+                  اعرض على الخريطة
+                  {m.mapCommand.params?.label && <span className="text-blue-400 dark:text-blue-500">— {m.mapCommand.params.label}</span>}
+                </button>
+              )}
             </div>
           </div>
         ))}
+
         {loading && (
           <div className="flex gap-2">
-            <div className="w-6 h-6 rounded-lg bg-blue-600 flex items-center justify-center"><Bot size={12} className="text-white" /></div>
+            <div className="w-6 h-6 rounded-lg bg-blue-600 flex items-center justify-center flex-shrink-0">
+              <Bot size={12} className="text-white" />
+            </div>
             <div className="bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-xl p-3">
-              <div className="flex gap-1">{[1, 2, 3].map(d => <div key={d} className="w-1.5 h-1.5 bg-blue-400 rounded-full typing-dot" />)}</div>
+              <div className="flex items-center gap-1.5">
+                <Loader2 size={11} className="text-blue-500 animate-spin" />
+                <span className="text-xs text-slate-400 dark:text-gray-500">يستعلم من قاعدة البيانات...</span>
+              </div>
             </div>
           </div>
         )}
@@ -348,16 +330,13 @@ function AIPanel({ stats, reports }) {
         <div className="flex gap-2">
           <input value={input} onChange={e => setInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') send() }}
-            placeholder={'اسأل عن البلاغات أو الغرامات...'}
+            placeholder="اسأل عن البلاغات، الخرائط، الأداء..."
             className="flex-1 bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-2 text-xs text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500" />
           <button onClick={() => send()} disabled={!input.trim() || loading}
             className="w-8 h-8 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 rounded-lg flex items-center justify-center transition-colors flex-shrink-0">
-            <Send size={13} className="text-white" />
+            {loading ? <Loader2 size={12} className="text-white animate-spin" /> : <Send size={12} className="text-white" />}
           </button>
         </div>
-        <p className="text-center text-xs text-slate-400 dark:text-gray-600 mt-1.5">
-          {apiKey ? '⚡ Claude AI · يقرأ من البيانات الفعلية' : '\u{1F4CA} تحليل محلي · أضف مفتاح API لتفعيل Claude'}
-        </p>
       </div>
     </div>
   )
@@ -497,6 +476,7 @@ const PANELS = [
 export default function Dashboard() {
   const { scopedReports: reports, isRestricted, scopeLabel } = useReportScope()
   const { reports: rawApiReports } = useApiReports()
+  const { aiFilters, aiBounds, heatmapPoints, aiMapLabel, clearAiMapState } = useMapContext()
 
   // Merge local (DataContext) + API-only reports for map — deduplicate by id
   const allMapReports = useMemo(() => {
@@ -515,13 +495,16 @@ export default function Dashboard() {
   const [mapStyle, setMapStyle] = useState('dark')
   const [selectedReport, setSelectedReport] = useState(null)
 
+  // AI filter overrides local dropdown; changing dropdown clears AI override
+  const effectiveFilterEl = aiFilters.element || filterEl
+
   const tiles = {
     dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
     light: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
     satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   }
 
-  const filtered = allMapReports.filter(r => filterEl === 'all' || r.element === filterEl)
+  const filtered = allMapReports.filter(r => effectiveFilterEl === 'all' || r.element === effectiveFilterEl)
   const usedElements = stats.byElement
 
   return (
@@ -565,6 +548,10 @@ export default function Dashboard() {
         <div className="flex-1 relative">
           <MapContainer center={[20.0131, 41.4677]} zoom={13} style={{ width: '100%', height: '100%' }} zoomControl={false}>
             <TileLayer url={tiles[mapStyle]} attribution="&copy; CartoDB" />
+
+            {/* AI viewport controller */}
+            <FitBoundsController bounds={aiBounds} />
+
             {allMapReports.length > 0 && (
               <MarkerClusterGroup chunkedLoading maxClusterRadius={55} showCoverageOnHover={false}>
                 {filtered.map(r => (
@@ -582,9 +569,17 @@ export default function Dashboard() {
                 ))}
               </MarkerClusterGroup>
             )}
+
+            {/* Manual heat layer */}
             {showHeat && filtered.map(r => (
               <Circle key={`h-${r.id}`} center={r.coords || [20.0131, 41.4677]} radius={700}
                 pathOptions={{ fillColor: r.elementColor || '#3B82F6', fillOpacity: 0.07, color: r.elementColor || '#3B82F6', weight: 1, opacity: 0.2 }} />
+            ))}
+
+            {/* AI-driven heatmap points */}
+            {heatmapPoints?.map((pt, i) => (
+              <Circle key={`ai-${i}`} center={[pt.lat, pt.lng]} radius={600}
+                pathOptions={{ fillColor: '#EF4444', fillOpacity: 0.12, color: '#EF4444', weight: 0.5, opacity: 0.3 }} />
             ))}
           </MapContainer>
 
@@ -604,13 +599,23 @@ export default function Dashboard() {
             </button>
           </div>
 
-          {/* Filter overlay */}
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[500]">
-            <select value={filterEl} onChange={e => setFilterEl(e.target.value)}
+          {/* Filter overlay + AI badge */}
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[500] flex items-center gap-2">
+            <select
+              value={effectiveFilterEl}
+              onChange={e => { setFilterEl(e.target.value); if (aiFilters.element) clearAiMapState() }}
               className="bg-white dark:bg-gray-900 border border-slate-200 dark:border-gray-700 rounded-xl px-4 py-2 text-sm text-slate-700 dark:text-gray-200 shadow-lg focus:outline-none focus:border-blue-500 cursor-pointer">
               <option value="all">{'كل العناصر'}</option>
               {usedElements.map(e => <option key={e.id} value={e.id}>{e.name} ({e.count})</option>)}
             </select>
+            {(aiMapLabel || aiFilters.element || heatmapPoints?.length > 0) && (
+              <button onClick={clearAiMapState}
+                className="flex items-center gap-1.5 bg-indigo-600/90 hover:bg-indigo-700/90 text-white text-xs rounded-xl px-2.5 py-2 shadow-lg backdrop-blur-sm transition-colors">
+                <Bot size={11} />
+                <span>{aiMapLabel || 'AI'}</span>
+                <span className="opacity-60">×</span>
+              </button>
+            )}
           </div>
 
           {/* Map stats overlay */}
@@ -669,7 +674,7 @@ export default function Dashboard() {
               {panel === 'reports' && <ReportsPanel reports={reports} onSelectReport={r => setSelectedReport(r)} />}
               {panel === 'performance' && <PerformancePanel stats={stats} />}
               {panel === 'financial' && <FinancialPanel stats={stats} />}
-              {panel === 'ai' && <AIPanel stats={stats} reports={reports} />}
+              {panel === 'ai' && <AIPanel />}
             </div>
           </div>
         ) : (

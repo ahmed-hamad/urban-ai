@@ -49,9 +49,10 @@ const TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        period:      { type: 'string', enum: ['week', 'month', '3months', 'year'] },
-        entity_name: { type: 'string', description: 'Entity/agency name in Arabic (partial match)' },
-        top_n:       { type: 'integer', description: 'Top N performers to return', default: 10 },
+        period:         { type: 'string', enum: ['week', 'month', '3months', 'year'] },
+        entity_name:    { type: 'string', description: 'Entity/agency name in Arabic (partial match)' },
+        inspector_name: { type: 'string', description: 'Inspector or monitor full name in Arabic (partial match). Use when user asks about a specific employee.' },
+        top_n:          { type: 'integer', description: 'Top N performers to return', default: 10 },
       },
     },
   },
