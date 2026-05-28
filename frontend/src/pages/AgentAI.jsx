@@ -1,261 +1,251 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
-import { useData } from '@/context/DataContext'
+import { useNavigate } from 'react-router-dom'
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell, LineChart, Line,
+} from 'recharts'
 import { useAuth } from '@/context/AuthContext'
-import { useReportScope } from '@/hooks/useReportScope'
-import { aiSampleQueries } from '@/data/mockData'
-import { Shield, AlertCircle } from 'lucide-react'
+import { useMapContext } from '@/context/MapContext'
+import {
+  Shield, AlertCircle, Map, TrendingUp, TrendingDown, Minus,
+  Loader2, Zap, Bot,
+} from 'lucide-react'
 
-const CustomTooltip = ({ active, payload, label }) => {
+const API = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
+
+// ─── Suggested queries ────────────────────────────────────────────────────────
+const SAMPLE_QUERIES = [
+  'ما ملخص البلاغات لهذا الشهر؟',
+  'ما أداء مراقبي الجهات هذا الربع؟',
+  'اعرض بلاغات حفريات الشوارع على الخريطة',
+  'ما التحليل المالي للمخالفات؟',
+  'اعرض خريطة كثافة البلاغات',
+  'ما أكثر عناصر التشوه رصداً؟',
+  'قارن معدلات الإغلاق حسب الجهة',
+  'ما إحصاءات التكرار بين مصادر الرصد؟',
+]
+
+// ─── Chart tooltip ────────────────────────────────────────────────────────────
+function ChartTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null
   return (
     <div className="bg-gray-800 border border-gray-700 rounded-xl p-3 text-xs shadow-xl">
       <p className="text-gray-400 mb-1">{label}</p>
       {payload.map((p, i) => (
-        <p key={i} style={{ color: p.fill || p.color }} className="font-bold">
+        <p key={i} style={{ color: p.fill || p.color || '#3B82F6' }} className="font-bold">
           {typeof p.value === 'number' && p.value > 10000
-            ? `${p.value.toLocaleString('ar-SA')} ريال`
-            : p.value?.toLocaleString?.('ar-SA') ?? p.value}
+            ? `${Number(p.value).toLocaleString('ar-SA')} ريال`
+            : Number(p.value)?.toLocaleString?.('ar-SA') ?? p.value}
         </p>
       ))}
     </div>
   )
 }
 
-export default function AgentAI() {
-  const { users, entities, auditLogs } = useData()
-  const { user } = useAuth()
-  const { scopedReports, isRestricted, scopeLabel } = useReportScope()
+// ─── KPI card ─────────────────────────────────────────────────────────────────
+function KpiCard({ label, value, unit, trend, trendUp }) {
+  const TrendIcon = trendUp === true ? TrendingUp : trendUp === false ? TrendingDown : Minus
+  const trendColor = trendUp === true ? 'text-emerald-400' : trendUp === false ? 'text-red-400' : 'text-gray-500'
+  return (
+    <div className="bg-gray-800/80 border border-gray-700/50 rounded-xl p-3 flex-shrink-0 min-w-[110px]">
+      <p className="text-xs text-gray-500 mb-1 leading-relaxed">{label}</p>
+      <p className="text-xl font-bold text-white leading-none">
+        {typeof value === 'number' ? Number(value).toLocaleString('ar-SA') : value}
+        {unit && <span className="text-xs text-gray-400 font-normal mr-1">{unit}</span>}
+      </p>
+      {trend && (
+        <div className={`flex items-center gap-1 mt-1.5 ${trendColor}`}>
+          <TrendIcon size={11} />
+          <span className="text-xs font-medium">{trend}</span>
+        </div>
+      )}
+    </div>
+  )
+}
 
-  const [messages, setMessages] = useState([
-    {
-      role: 'assistant',
-      text: `مرحباً! أنا المساعد التحليلي لمنصة رصد التشوهات البصرية في أمانة الباحة.\n\nأقرأ من بيانات النظام الفعلية${isRestricted && scopeLabel ? ` (${scopeLabel})` : ''}.\n\nيمكنني مساعدتك في:\n- تحليل إحصائيات البلاغات\n- التوقع المالي والغرامات\n- أداء المستخدمين والجهات\n- تحليل العناصر والمخالفات\n\n⚠️ تنبيه: المساعد يقترح تحليلات فقط. القرارات النهائية تعود للمستخدم المختص.`,
-      chart: null,
-      timestamp: new Date()
+// ─── Data table ───────────────────────────────────────────────────────────────
+function DataTable({ columns, rows }) {
+  if (!columns?.length || !rows?.length) return null
+  return (
+    <div className="overflow-x-auto rounded-xl border border-gray-700/50">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-gray-700/50 bg-gray-800/50">
+            {columns.map((col, i) => (
+              <th key={i} className="text-right px-3 py-2 text-gray-400 font-medium">{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i} className="border-b border-gray-700/30 last:border-0 hover:bg-gray-800/40 transition-colors">
+              {row.map((cell, j) => (
+                <td key={j} className="px-3 py-2 text-gray-300">{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ─── Text renderer (bold, list items, alerts) ─────────────────────────────────
+function renderText(text) {
+  if (!text) return null
+  return text.split('\n').map((line, i) => {
+    if (line.startsWith('**') && line.endsWith('**'))
+      return <p key={i} className="font-bold text-white my-1">{line.replace(/\*\*/g, '')}</p>
+    if (line.includes('**')) {
+      const parts = line.split(/\*\*(.*?)\*\*/g)
+      return (
+        <p key={i} className="text-gray-300 text-sm leading-relaxed">
+          {parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-white">{p}</strong> : p)}
+        </p>
+      )
     }
-  ])
-  const [input, setInput] = useState('')
+    if (line.startsWith('- ') || line.match(/^\d+\.\s/))
+      return <li key={i} className="text-gray-300 text-sm mr-4 leading-relaxed">{line.replace(/^[-\d]+\.?\s/, '')}</li>
+    if (line.startsWith('⚠️') || line.startsWith('🔒') || line.startsWith('ℹ️'))
+      return <p key={i} className="text-amber-400 text-xs bg-amber-500/10 rounded-lg px-3 py-2 border border-amber-500/20 my-1">{line}</p>
+    if (line.trim() === '') return <br key={i} />
+    return <p key={i} className="text-gray-300 text-sm leading-relaxed">{line}</p>
+  })
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
+export default function AgentAI() {
+  const { user, authFetch } = useAuth()
+  const { applyMapCommand } = useMapContext()
+  const navigate = useNavigate()
+
+  const [messages, setMessages] = useState([{
+    role: 'assistant',
+    text: `مرحباً! أنا المساعد المكاني الذكي لمنصة UrbanAI.\n\nأقرأ بيانات حقيقية من قاعدة البيانات وأقدم تحليلات مكانية وتشغيلية متقدمة.\n\nيمكنني مساعدتك في:\n- **إحصاءات البلاغات** والأداء التشغيلي\n- **التحليل المكاني** وعرض النتائج على الخريطة\n- **التحليل المالي** وتوقعات الغرامات\n- **أداء المراقبين** والجهات\n- **تحليل التكرار** بين مصادر الرصد\n\n⚠️ المساعد يقترح تحليلات فقط. القرارات النهائية تعود للمستخدم المختص.`,
+    timestamp: new Date(),
+  }])
+  const [input, setInput]     = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState(null)
   const bottomRef = useRef(null)
-  const inputRef = useRef(null)
+  const inputRef  = useRef(null)
+
+  // Keep last 6 messages as conversation history for multi-turn context
+  const historyRef = useRef([])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Real data computation based on RBAC-scoped reports
-  const generateResponse = useCallback((query) => {
-    const q = query.toLowerCase()
-    const r = scopedReports
-    const scopeSuffix = isRestricted && scopeLabel ? ` (${scopeLabel})` : ''
-
-    if (r.length === 0) {
-      return {
-        text: `لا توجد بيانات في نطاق صلاحياتك${scopeSuffix} لتحليلها حالياً.`,
-        chart: null,
-      }
-    }
-
-    // Pre-compute real stats
-    const total = r.length
-    const openReports = r.filter(x => !['closed_final', 'rejected'].includes(x.status))
-    const closed = r.filter(x => x.status === 'closed_final')
-    const open = openReports.length
-    const closureRate = total ? Math.round((closed.length / total) * 100) : 0
-    const fineIssued = r.filter(x => x.closureType === 'fine_issued')
-    const totalFines = fineIssued.reduce((s, x) => s + (x.estimatedFine || 0), 0)
-    const avgFine = fineIssued.length ? Math.round(totalFines / fineIssued.length) : 0
-
-    // By element
-    const byElement = Object.values(
-      r.reduce((acc, x) => {
-        const k = x.elementName || x.element || 'أخرى'
-        if (!acc[k]) acc[k] = { name: k, count: 0, color: x.elementColor || '#3B82F6', fines: 0 }
-        acc[k].count++
-        if (x.closureType === 'fine_issued') acc[k].fines += x.estimatedFine || 0
-        return acc
-      }, {})
-    ).sort((a, b) => b.count - a.count)
-
-    // By entity
-    const byEntity = Object.entries(
-      r.reduce((acc, x) => {
-        if (!x.entity) return acc
-        if (!acc[x.entity]) acc[x.entity] = { total: 0, closed: 0 }
-        acc[x.entity].total++
-        if (x.status === 'closed_final') acc[x.entity].closed++
-        return acc
-      }, {})
-    ).map(([name, { total: t, closed: c }]) => ({
-      name, total: t, closed: c,
-      rate: t ? Math.round((c / t) * 100) : 0
-    })).sort((a, b) => b.rate - a.rate)
-
-    // Monthly last 6 months
-    const monthlyStats = [...Array(6)].map((_, i) => {
-      const d = new Date()
-      d.setDate(1)
-      d.setMonth(d.getMonth() - (5 - i))
-      const y = d.getFullYear(), m = d.getMonth()
-      const label = d.toLocaleString('ar-SA', { month: 'short' })
-      const monthReports = r.filter(x => { const dd = new Date(x.createdAt); return dd.getFullYear() === y && dd.getMonth() === m })
-      const monthFines = r.filter(x => {
-        if (x.closureType !== 'fine_issued') return false
-        const dd = new Date(x.updatedAt); return dd.getFullYear() === y && dd.getMonth() === m
-      })
-      return {
-        name: label,
-        بلاغات: monthReports.length,
-        مغلق: monthReports.filter(x => x.status === 'closed_final').length,
-        value: monthFines.reduce((s, x) => s + (x.estimatedFine || 0), 0),
-        fill: '#3B82F6',
-      }
-    })
-
-    // ── Response dispatch ────────────────────────────────────────────────────
-    if (q.includes('مفتوح') || q.includes('مفتوحة') || q.includes('ملخص') || q.includes('إجمالي')) {
-      const byStatus = r.reduce((acc, x) => {
-        const key = x.status; acc[key] = (acc[key] || 0) + 1; return acc
-      }, {})
-      return {
-        text: `**ملخص البلاغات${scopeSuffix}:**\n\n- إجمالي البلاغات: **${total}**\n- البلاغات المفتوحة: **${open}** (${total ? Math.round((open/total)*100) : 0}%)\n- البلاغات المغلقة: **${closed.length}**\n- معدل الإغلاق: **${closureRate}%**\n- بلاغات بغرامة مُحررة: **${fineIssued.length}**`,
-        chart: {
-          type: 'bar', title: 'توزيع حالات البلاغات',
-          data: Object.entries(byStatus).map(([k, v]) => ({ name: k, value: v, fill: '#3B82F6' }))
-        }
-      }
-    }
-
-    if (q.includes('عنصر') || q.includes('أكثر') || q.includes('نوع')) {
-      const top = byElement.slice(0, 7)
-      return {
-        text: `**أكثر العناصر رصداً${scopeSuffix}:**\n\n${top.map((e, i) => `${i + 1}. ${e.name}: **${e.count}** بلاغ`).join('\n')}\n\nإجمالي العناصر المرصودة: ${byElement.length} نوع`,
-        chart: {
-          type: 'bar', title: 'توزيع العناصر المرصودة',
-          data: top.map(e => ({ name: e.name, value: e.count, fill: e.color }))
-        }
-      }
-    }
-
-    if (q.includes('مالي') || q.includes('غرام') || q.includes('تحصيل') || q.includes('توقع')) {
-      if (fineIssued.length === 0) {
-        return {
-          text: `لا توجد بلاغات مغلقة بغرامة بعد${scopeSuffix}. يتطلب الحساب المالي وجود بلاغات مُغلقة بنوع إجراء "تحرير مخالفة مالية".`,
-          chart: null
-        }
-      }
-      return {
-        text: `**التوقع المالي${scopeSuffix}:**\n\n- إجمالي الغرامات المحصّلة: **${totalFines.toLocaleString('ar-SA')} ريال**\n- عدد المخالفات: **${fineIssued.length}** بلاغ\n- متوسط الغرامة: **${avgFine.toLocaleString('ar-SA')} ريال**\n- سيناريو التكرار: **${(totalFines * 2).toLocaleString('ar-SA')} ريال**\n\n⚠️ هذه بيانات فعلية من النظام. البلاغات بدون تحرير مخالفة لا تحتسب.`,
-        chart: {
-          type: 'bar', title: 'الغرامات المحصّلة حسب العنصر',
-          data: byElement.filter(e => e.fines > 0).map(e => ({ name: e.name, value: e.fines, fill: e.color }))
-        }
-      }
-    }
-
-    if (q.includes('أداء') || q.includes('جهة') || q.includes('بلدية') || q.includes('مقارنة')) {
-      if (byEntity.length === 0) {
-        return {
-          text: `لا توجد بيانات جهات مرتبطة بالبلاغات${scopeSuffix} حتى الآن.`,
-          chart: null
-        }
-      }
-      return {
-        text: `**أداء الجهات${scopeSuffix}:**\n\n${byEntity.slice(0, 5).map((e, i) => `${i + 1}. ${e.name}: ${e.rate}% إغلاق (${e.closed}/${e.total})`).join('\n')}\n\nأفضل جهة: **${byEntity[0]?.name}** بمعدل إغلاق **${byEntity[0]?.rate}%**`,
-        chart: {
-          type: 'bar', title: 'معدل الإغلاق حسب الجهة',
-          data: byEntity.slice(0, 6).map(e => ({
-            name: e.name.slice(0, 12),
-            value: e.rate,
-            fill: e.rate >= 80 ? '#10B981' : e.rate >= 60 ? '#F59E0B' : '#EF4444'
-          }))
-        }
-      }
-    }
-
-    if (q.includes('شهر') || q.includes('شهرية') || q.includes('اتجاه') || q.includes('تقرير')) {
-      return {
-        text: `**التقرير الشهري${scopeSuffix}:**\n\n${monthlyStats.map(m => `- ${m.name}: **${m['بلاغات']}** بلاغ، أُغلق منها **${m['مغلق']}**`).join('\n')}\n\nإجمالي 6 أشهر: **${monthlyStats.reduce((s, m) => s + m['بلاغات'], 0)}** بلاغ`,
-        chart: {
-          type: 'bar', title: 'البلاغات الشهرية - آخر 6 أشهر',
-          data: monthlyStats.map(m => ({ ...m, value: m['بلاغات'] }))
-        }
-      }
-    }
-
-    // Default: general summary
-    return {
-      text: `**ملخص النظام${scopeSuffix}:**\n\n- إجمالي البلاغات: **${total}**\n- نسبة الإغلاق: **${closureRate}%**\n- البلاغات بغرامة: **${fineIssued.length}**\n- إجمالي الغرامات: **${totalFines.toLocaleString('ar-SA')} ريال**\n\n${isRestricted ? `🔒 تعرض فقط بيانات ${scopeLabel} · للوصول الكامل تواصل مع المدير\n\n` : ''}جرّب أسئلة مثل: "ما أكثر العناصر رصداً؟" أو "ما التوقع المالي؟"`,
-      chart: null
-    }
-  }, [scopedReports, isRestricted, scopeLabel])
-
-  const sendMessage = async (text) => {
-    const userText = text || input.trim()
+  const sendMessage = useCallback(async (text) => {
+    const userText = (text || input).trim()
     if (!userText || loading) return
 
-    setMessages(prev => [...prev, { role: 'user', text: userText, timestamp: new Date() }])
+    const userMsg = { role: 'user', text: userText, timestamp: new Date() }
+    setMessages(prev => [...prev, userMsg])
     setInput('')
     setLoading(true)
+    setError(null)
 
-    await new Promise(r => setTimeout(r, 600 + Math.random() * 600))
+    // Build history payload: only role + content for API
+    const history = historyRef.current.slice(-6).map(m => ({
+      role:    m.role,
+      content: m.text,
+    }))
 
-    const response = generateResponse(userText)
-    setMessages(prev => [...prev, { role: 'assistant', ...response, timestamp: new Date() }])
-    setLoading(false)
-  }
+    try {
+      const res  = await authFetch('/api/assistant/query', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ message: userText, history }),
+      })
 
-  const renderText = (text) => {
-    return text.split('\n').map((line, i) => {
-      if (line.startsWith('**') && line.endsWith('**')) {
-        return <p key={i} className="font-bold text-white my-1">{line.replace(/\*\*/g, '')}</p>
+      if (res?.status === 503) {
+        const d = await res.json()
+        throw new Error(d.error || 'خدمة الذكاء الاصطناعي غير متاحة حالياً')
       }
-      if (line.includes('**')) {
-        const parts = line.split(/\*\*(.*?)\*\*/g)
-        return <p key={i} className="text-gray-300 text-sm leading-relaxed">{parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-white">{p}</strong> : p)}</p>
+      if (!res?.ok) {
+        const d = await res?.json().catch(() => ({}))
+        throw new Error(d?.error || `خطأ في الخادم (${res?.status})`)
       }
-      if (line.startsWith('- ')) {
-        return <li key={i} className="text-gray-300 text-sm mr-4 leading-relaxed">{line.slice(2)}</li>
+
+      const data = await res.json()
+
+      // Apply map command if present (stores in MapContext for GISMap to consume)
+      if (data.mapCommand) {
+        // For heatmap: embed the points from heatmap tool result
+        applyMapCommand(data.mapCommand)
       }
-      if (line.startsWith('⚠️') || line.startsWith('🔒')) {
-        return <p key={i} className="text-amber-400 text-xs bg-amber-500/10 rounded-lg px-3 py-2 border border-amber-500/20 my-1">{line}</p>
+
+      const assistantMsg = {
+        role:       'assistant',
+        text:       data.text || '',
+        chart:      data.chart || null,
+        kpis:       data.kpis  || null,
+        table:      data.table || null,
+        mapCommand: data.mapCommand || null,
+        timestamp:  new Date(),
       }
-      if (line.trim() === '') return <br key={i} />
-      return <p key={i} className="text-gray-300 text-sm leading-relaxed">{line}</p>
-    })
-  }
+
+      setMessages(prev => [...prev, assistantMsg])
+
+      // Update history ref
+      historyRef.current = [
+        ...historyRef.current,
+        { role: 'user',      text: userText },
+        { role: 'assistant', text: data.text || '' },
+      ].slice(-12)
+
+    } catch (err) {
+      setError(err.message)
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        text: `⚠️ حدث خطأ: ${err.message}`,
+        timestamp: new Date(),
+      }])
+    } finally {
+      setLoading(false)
+    }
+  }, [input, loading, authFetch, applyMapCommand])
 
   return (
     <div className="flex gap-5 h-[calc(100vh-130px)]">
-      {/* Sidebar */}
+
+      {/* ── Sidebar ── */}
       <div className="w-72 flex-shrink-0 bg-gray-900 border border-gray-800 rounded-2xl p-4 flex flex-col gap-4">
+
         <div>
-          <h3 className="font-bold text-white text-sm mb-1">المساعد التحليلي</h3>
-          <p className="text-xs text-gray-500">يقرأ من بيانات النظام الفعلية</p>
+          <div className="flex items-center gap-2 mb-1">
+            <Bot size={16} className="text-blue-400" />
+            <h3 className="font-bold text-white text-sm">المساعد المكاني الذكي</h3>
+          </div>
+          <p className="text-xs text-gray-500">يقرأ من قاعدة البيانات مباشرة</p>
         </div>
 
-        <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3">
-          <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+        {/* AI engine status */}
+        <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/20 rounded-xl p-3">
+          <Zap size={12} className="text-blue-400 flex-shrink-0" />
           <div>
-            <p className="text-xs font-medium text-emerald-300">{scopedReports.length} بلاغ في نطاقك</p>
-            <p className="text-xs text-emerald-400/60">{isRestricted ? scopeLabel : 'وصول كامل'}</p>
+            <p className="text-xs font-medium text-blue-300">Claude Sonnet — أدوات تحليلية</p>
+            <p className="text-xs text-blue-400/60">PostGIS · RBAC · Analytics</p>
           </div>
         </div>
 
-        {isRestricted && (
+        {/* RBAC scope */}
+        {user?.role !== 'admin' && user?.role !== 'executive' && (
           <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-xl p-3">
             <Shield size={12} className="text-amber-400 flex-shrink-0 mt-0.5" />
             <p className="text-xs text-amber-400/80">
-              المساعد يرد فقط على بيانات نطاقك المصرح به.
+              التحليل محدود بنطاق صلاحياتك ({user?.entityName || user?.role}).
             </p>
           </div>
         )}
 
-        <div>
+        {/* Sample queries */}
+        <div className="flex-1 overflow-y-auto">
           <p className="text-xs text-gray-500 mb-3 font-medium">أسئلة مقترحة:</p>
           <div className="space-y-2">
-            {aiSampleQueries.map((q, i) => (
+            {SAMPLE_QUERIES.map((q, i) => (
               <button key={i} onClick={() => sendMessage(q)} disabled={loading}
                 className="w-full text-right text-xs text-gray-400 hover:text-white bg-gray-800/60 hover:bg-gray-800 border border-gray-700/50 hover:border-gray-600 rounded-xl p-3 transition-all leading-relaxed disabled:opacity-50">
                 {q}
@@ -264,33 +254,37 @@ export default function AgentAI() {
           </div>
         </div>
 
-        <div className="mt-auto">
-          <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 space-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <AlertCircle size={11} className="text-amber-400" />
-              <p className="text-xs text-amber-400 font-medium">AI مساعدة فقط</p>
-            </div>
-            <p className="text-xs text-amber-400/70 leading-relaxed">
-              المساعد يقترح تحليلات. القرارات النهائية تعود للمستخدم المختص.
-            </p>
+        {/* Governance notice */}
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <AlertCircle size={11} className="text-amber-400" />
+            <p className="text-xs text-amber-400 font-medium">AI مساعدة فقط</p>
           </div>
+          <p className="text-xs text-amber-400/70 leading-relaxed">
+            المساعد يقترح تحليلات. القرارات النهائية تعود للمستخدم المختص.
+          </p>
         </div>
       </div>
 
-      {/* Chat area */}
+      {/* ── Chat area ── */}
       <div className="flex-1 flex flex-col bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
           {messages.map((msg, i) => (
             <div key={i} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 text-base ${
+
+              {/* Avatar */}
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 text-sm ${
                 msg.role === 'assistant'
                   ? 'bg-gradient-to-br from-blue-500 to-purple-600 shadow-lg shadow-blue-500/20'
                   : 'bg-gray-700'
               }`}>
-                {msg.role === 'assistant' ? '📊' : '👤'}
+                {msg.role === 'assistant' ? <Bot size={18} className="text-white" /> : '👤'}
               </div>
 
-              <div className={`flex-1 max-w-[85%] space-y-3 ${msg.role === 'user' ? 'items-end flex flex-col' : ''}`}>
+              <div className={`flex-1 max-w-[90%] space-y-3 ${msg.role === 'user' ? 'items-end flex flex-col' : ''}`}>
+
+                {/* Bubble */}
                 <div className={`rounded-2xl p-4 ${
                   msg.role === 'assistant'
                     ? 'bg-gray-800 border border-gray-700/50 rounded-tr-sm'
@@ -303,6 +297,14 @@ export default function AgentAI() {
                   )}
                 </div>
 
+                {/* KPI cards */}
+                {msg.kpis?.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {msg.kpis.map((kpi, j) => <KpiCard key={j} {...kpi} />)}
+                  </div>
+                )}
+
+                {/* Chart */}
                 {msg.chart && (
                   <div className="bg-gray-800 border border-gray-700/50 rounded-2xl p-4 w-full">
                     <p className="text-xs font-medium text-gray-400 mb-3">{msg.chart.title}</p>
@@ -312,7 +314,7 @@ export default function AgentAI() {
                           <CartesianGrid strokeDasharray="3 3" stroke="#1F2937" vertical={false} />
                           <XAxis dataKey="name" tick={{ fill: '#6B7280', fontSize: 10 }} axisLine={false} tickLine={false} />
                           <YAxis tick={{ fill: '#6B7280', fontSize: 10 }} axisLine={false} tickLine={false} />
-                          <Tooltip content={<CustomTooltip />} />
+                          <Tooltip content={<ChartTooltip />} />
                           <Bar dataKey="value" radius={[4, 4, 0, 0]}>
                             {msg.chart.data.map((d, j) => <Cell key={j} fill={d.fill || '#3B82F6'} />)}
                           </Bar>
@@ -322,52 +324,93 @@ export default function AgentAI() {
                     {msg.chart.type === 'pie' && (
                       <ResponsiveContainer width="100%" height={180}>
                         <PieChart>
-                          <Pie data={msg.chart.data} cx="50%" cy="50%" outerRadius={70} innerRadius={30} dataKey="value">
-                            {msg.chart.data.map((d, j) => <Cell key={j} fill={d.color || d.fill} />)}
+                          <Pie data={msg.chart.data} cx="50%" cy="50%" outerRadius={70} innerRadius={28} dataKey="value" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false}>
+                            {msg.chart.data.map((d, j) => <Cell key={j} fill={d.fill || d.color || '#3B82F6'} />)}
                           </Pie>
-                          <Tooltip content={<CustomTooltip />} />
+                          <Tooltip content={<ChartTooltip />} />
                         </PieChart>
+                      </ResponsiveContainer>
+                    )}
+                    {msg.chart.type === 'line' && (
+                      <ResponsiveContainer width="100%" height={180}>
+                        <LineChart data={msg.chart.data}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1F2937" vertical={false} />
+                          <XAxis dataKey="name" tick={{ fill: '#6B7280', fontSize: 10 }} axisLine={false} tickLine={false} />
+                          <YAxis tick={{ fill: '#6B7280', fontSize: 10 }} axisLine={false} tickLine={false} />
+                          <Tooltip content={<ChartTooltip />} />
+                          <Line type="monotone" dataKey="value" stroke="#3B82F6" strokeWidth={2} dot={{ fill: '#3B82F6', r: 3 }} />
+                        </LineChart>
                       </ResponsiveContainer>
                     )}
                   </div>
                 )}
 
-                <p className="text-xs text-gray-600 px-1">{msg.timestamp.toLocaleTimeString('ar-SA')}</p>
+                {/* Data table */}
+                {msg.table?.columns?.length > 0 && (
+                  <div className="w-full">
+                    <DataTable columns={msg.table.columns} rows={msg.table.rows} />
+                  </div>
+                )}
+
+                {/* Map command action button */}
+                {msg.mapCommand && (
+                  <button
+                    onClick={() => { applyMapCommand(msg.mapCommand); navigate('/map') }}
+                    className="flex items-center gap-2 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 hover:border-blue-400/60 text-blue-300 text-xs font-medium px-4 py-2 rounded-xl transition-all">
+                    <Map size={13} />
+                    اعرض على الخريطة
+                    {msg.mapCommand.params?.label && (
+                      <span className="text-blue-400/60">— {msg.mapCommand.params.label}</span>
+                    )}
+                  </button>
+                )}
+
+                <p className="text-xs text-gray-600 px-1">
+                  {new Date(msg.timestamp).toLocaleTimeString('ar-SA')}
+                </p>
               </div>
             </div>
           ))}
 
+          {/* Loading indicator */}
           {loading && (
             <div className="flex gap-3">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-base">📊</div>
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+                <Bot size={18} className="text-white" />
+              </div>
               <div className="bg-gray-800 border border-gray-700/50 rounded-2xl rounded-tr-sm p-4">
-                <div className="flex items-center gap-1.5">
-                  {[1, 2, 3].map(d => (
-                    <div key={d} className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: `${d * 150}ms` }} />
-                  ))}
-                  <span className="text-xs text-gray-500 mr-2">يحلل البيانات...</span>
+                <div className="flex items-center gap-2">
+                  <Loader2 size={14} className="text-blue-400 animate-spin" />
+                  <span className="text-xs text-gray-500">يستعلم من قاعدة البيانات...</span>
                 </div>
               </div>
             </div>
           )}
+
           <div ref={bottomRef} />
         </div>
 
+        {/* ── Input area ── */}
         <div className="p-4 border-t border-gray-800">
+          {error && (
+            <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-3">
+              {error}
+            </p>
+          )}
           <div className="flex gap-3 items-end">
             <div className="flex-1 bg-gray-800 border border-gray-700 rounded-xl p-3 focus-within:border-blue-500 transition-all">
               <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
-                placeholder="اسأل عن البلاغات، الإحصائيات، التوقع المالي..." rows={2}
+                placeholder="اسأل عن البلاغات، الخرائط، الأداء، التحليل المالي..." rows={2}
                 className="w-full bg-transparent text-white placeholder-gray-600 text-sm resize-none focus:outline-none leading-relaxed" />
             </div>
             <button onClick={() => sendMessage()} disabled={!input.trim() || loading}
               className="w-12 h-12 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl flex items-center justify-center transition-all shadow-lg shadow-blue-500/20 flex-shrink-0">
-              <span className="text-white text-lg">↑</span>
+              {loading ? <Loader2 size={18} className="text-white animate-spin" /> : <span className="text-white text-lg">↑</span>}
             </button>
           </div>
           <p className="text-xs text-gray-600 mt-2 text-center">
-            البيانات من النظام الفعلي فقط · محدودة بنطاق صلاحياتك · AI مساعدة، ليست قراراً نهائياً
+            بيانات حقيقية من قاعدة البيانات · محدودة بنطاق صلاحياتك · AI مساعدة، ليست قراراً نهائياً
           </p>
         </div>
       </div>

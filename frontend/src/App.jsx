@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { ThemeProvider } from './context/ThemeContext'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { DataProvider } from './context/DataContext'
+import { MapProvider } from './context/MapContext'
 import Layout from './components/layout/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
@@ -20,6 +21,7 @@ import GISImport from './pages/GISImport'
 import GISIntakeQueue from './pages/GISIntakeQueue'
 import ObservationLayers from './pages/ObservationLayers'
 import DuplicateAnalysis from './pages/DuplicateAnalysis'
+import AgentAI from './pages/AgentAI'
 
 // Route-level RBAC guard — redirects to dashboard if role not authorized
 function RequireRole({ roles, children }) {
@@ -34,6 +36,7 @@ export default function App() {
     <ThemeProvider>
       <AuthProvider>
         <DataProvider>
+        <MapProvider>
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
@@ -90,10 +93,12 @@ export default function App() {
                   <DuplicateAnalysis />
                 </RequireRole>
               } />
+              <Route path="/agent" element={<AgentAI />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>
+        </MapProvider>
         </DataProvider>
       </AuthProvider>
     </ThemeProvider>

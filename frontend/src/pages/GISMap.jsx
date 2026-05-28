@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import { MapContainer, TileLayer, Marker, Popup, Circle, GeoJSON } from 'react-leaflet'
+import { MapContainer, TileLayer, Marker, Popup, Circle, GeoJSON, useMap } from 'react-leaflet'
 import MarkerClusterGroup from 'react-leaflet-cluster'
 import L from 'leaflet'
-import { Filter, Layers, Download, X, ChevronDown, ChevronUp, Database } from 'lucide-react'
+import { Filter, Layers, Download, X, ChevronDown, ChevronUp, Database, Bot } from 'lucide-react'
 import { statusConfig, regulationData } from '@/data/mockData'
 import { useData } from '@/context/DataContext'
 import { useApiReports, useApiSpatialLayers, normalizeApiReport } from '@/hooks/useApiReports'
+import { useMapContext } from '@/context/MapContext'
 
 const createIcon = (color) => L.divIcon({
   html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2.5px solid white;box-shadow:0 1px 6px rgba(0,0,0,0.35);"></div>`,
@@ -13,114 +14,6 @@ const createIcon = (color) => L.divIcon({
 })
 
 const card = 'bg-white dark:bg-gray-900 border border-slate-200 dark:border-gray-800'
-
-// ─── Static GeoJSON layers ────────────────────────────────────────────────────
-// Approximate district boundaries for Albaha city (WGS84 lon,lat)
-const DISTRICTS_GEOJSON = {
-  type: 'FeatureCollection',
-  features: [
-    { type: 'Feature', properties: { name: 'شمال الباحة', color: '#3B82F6' },
-      geometry: { type: 'Polygon', coordinates: [[[41.450,20.025],[41.490,20.025],[41.490,20.050],[41.450,20.050],[41.450,20.025]]] } },
-    { type: 'Feature', properties: { name: 'جنوب الباحة', color: '#8B5CF6' },
-      geometry: { type: 'Polygon', coordinates: [[[41.460,19.990],[41.495,19.990],[41.495,20.010],[41.460,20.010],[41.460,19.990]]] } },
-    { type: 'Feature', properties: { name: 'حي الوسط', color: '#10B981' },
-      geometry: { type: 'Polygon', coordinates: [[[41.455,20.000],[41.480,20.000],[41.480,20.022],[41.455,20.022],[41.455,20.000]]] } },
-    { type: 'Feature', properties: { name: 'شرق الباحة', color: '#F59E0B' },
-      geometry: { type: 'Polygon', coordinates: [[[41.475,20.010],[41.510,20.010],[41.510,20.038],[41.475,20.038],[41.475,20.010]]] } },
-    { type: 'Feature', properties: { name: 'غرب الباحة', color: '#EF4444' },
-      geometry: { type: 'Polygon', coordinates: [[[41.430,20.005],[41.462,20.005],[41.462,20.030],[41.430,20.030],[41.430,20.005]]] } },
-    { type: 'Feature', properties: { name: 'المنحنى', color: '#06B6D4' },
-      geometry: { type: 'Polygon', coordinates: [[[41.420,19.995],[41.458,19.995],[41.458,20.015],[41.420,20.015],[41.420,19.995]]] } },
-    { type: 'Feature', properties: { name: 'العقيق', color: '#EC4899' },
-      geometry: { type: 'Polygon', coordinates: [[[41.462,20.022],[41.498,20.022],[41.498,20.048],[41.462,20.048],[41.462,20.022]]] } },
-  ],
-}
-
-// Priority zones (high-density urban commercial/industrial areas)
-const PRIORITY_GEOJSON = {
-  type: 'FeatureCollection',
-  features: [
-    { type: 'Feature', properties: { name: 'المركز التجاري', priority: 'high', color: '#EF4444' },
-      geometry: { type: 'Polygon', coordinates: [[[41.458,20.005],[41.475,20.005],[41.475,20.018],[41.458,20.018],[41.458,20.005]]] } },
-    { type: 'Feature', properties: { name: 'المنطقة الصناعية', priority: 'medium', color: '#F59E0B' },
-      geometry: { type: 'Polygon', coordinates: [[[41.478,20.020],[41.500,20.020],[41.500,20.035],[41.478,20.035],[41.478,20.020]]] } },
-    { type: 'Feature', properties: { name: 'المنطقة السياحية', priority: 'low', color: '#10B981' },
-      geometry: { type: 'Polygon', coordinates: [[[41.440,20.025],[41.460,20.025],[41.460,20.042],[41.440,20.042],[41.440,20.025]]] } },
-  ],
-}
-
-// Maintenance contract zones
-const CONTRACTS_GEOJSON = {
-  type: 'FeatureCollection',
-  features: [
-    { type: 'Feature', properties: { name: 'عقد صيانة الطرق - المنطقة أ', contractor: 'شركة الطرق الوطنية', color: '#7C3AED' },
-      geometry: { type: 'Polygon', coordinates: [[[41.450,20.000],[41.480,20.000],[41.480,20.028],[41.450,20.028],[41.450,20.000]]] } },
-    { type: 'Feature', properties: { name: 'عقد النظافة - المنطقة ب', contractor: 'شركة البيئة', color: '#059669' },
-      geometry: { type: 'Polygon', coordinates: [[[41.480,20.005],[41.505,20.005],[41.505,20.030],[41.480,20.030],[41.480,20.005]]] } },
-  ],
-}
-
-function districtStyle(feature) {
-  return {
-    color: feature.properties.color,
-    weight: 2,
-    opacity: 0.8,
-    fillColor: feature.properties.color,
-    fillOpacity: 0.06,
-    dashArray: '5,5',
-  }
-}
-
-function priorityStyle(feature) {
-  const alpha = feature.properties.priority === 'high' ? 0.15 : feature.properties.priority === 'medium' ? 0.10 : 0.07
-  return {
-    color: feature.properties.color,
-    weight: 1.5,
-    opacity: 0.7,
-    fillColor: feature.properties.color,
-    fillOpacity: alpha,
-  }
-}
-
-function contractStyle(feature) {
-  return {
-    color: feature.properties.color,
-    weight: 2.5,
-    opacity: 0.6,
-    fillColor: feature.properties.color,
-    fillOpacity: 0.08,
-    dashArray: '10,4',
-  }
-}
-
-function onEachDistrict(feature, layer) {
-  layer.bindTooltip(feature.properties.name, {
-    permanent: false, direction: 'center',
-    className: 'bg-white dark:bg-gray-800 text-slate-700 text-xs font-medium rounded shadow-lg px-2 py-1 border-0',
-  })
-}
-
-function onEachPriority(feature, layer) {
-  const p = { high: 'عالية', medium: 'متوسطة', low: 'منخفضة' }[feature.properties.priority] || ''
-  layer.bindTooltip(`${feature.properties.name} · أولوية ${p}`, {
-    permanent: false, direction: 'center',
-    className: 'bg-white text-slate-700 text-xs font-medium rounded shadow px-2 py-1 border-0',
-  })
-}
-
-function onEachContract(feature, layer) {
-  layer.bindTooltip(`${feature.properties.name}\n${feature.properties.contractor}`, {
-    permanent: false, direction: 'center',
-    className: 'bg-white text-slate-700 text-xs font-medium rounded shadow px-2 py-1 border-0',
-  })
-}
-
-const LAYER_CONFIG = [
-  { id: 'districts', label: 'حدود الأحياء', color: '#3B82F6', desc: '7 أحياء' },
-  { id: 'priority', label: 'مناطق الأولوية', color: '#EF4444', desc: '3 مناطق' },
-  { id: 'contracts', label: 'عقود الصيانة', color: '#7C3AED', desc: '2 عقود' },
-  { id: 'heat', label: 'طبقة حرارية', color: '#F59E0B', desc: 'كثافة البلاغات' },
-]
 
 const LAYER_TYPE_COLORS = {
   municipalities:              '#3B82F6',
@@ -162,8 +55,22 @@ function onEachDynamicFeature(feature, layer) {
   }
 }
 
+// Reacts to AI-driven bounds changes and fits the map viewport accordingly
+function FitBoundsController({ bounds }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!bounds) return
+    map.fitBounds(
+      [[bounds.south, bounds.west], [bounds.north, bounds.east]],
+      { padding: [40, 40], animate: true },
+    )
+  }, [bounds, map])
+  return null
+}
+
 export default function GISMap() {
   const { reports: localReports } = useData()
+  const { aiFilters, aiBounds, heatmapPoints, aiMapLabel, clearAiMapState } = useMapContext()
 
   // API-backed data (DB reports + operational layers)
   const { reports: rawApiReports } = useApiReports({ limit: '500' })
@@ -183,27 +90,32 @@ export default function GISMap() {
   const [selected, setSelected] = useState(null)
   const [mapStyle, setMapStyle] = useState('dark')
   const [showLayers, setShowLayers] = useState(false)
-  const [activeLayers, setActiveLayers] = useState({ districts: false, priority: false, contracts: false, heat: false })
+  const [activeLayers, setActiveLayers] = useState({ heat: false })
   const [activeDynamicLayers, setActiveDynamicLayers] = useState({})
 
   const toggleLayer        = (id) => setActiveLayers(p => ({ ...p, [id]: !p[id] }))
   const toggleDynamicLayer = (id) => setActiveDynamicLayers(p => ({ ...p, [id]: !p[id] }))
 
+  // AI filter overrides local filter when set; changing a dropdown clears the AI override
+  const effectiveElement = aiFilters.element || filterElement
+  const effectiveStatus  = aiFilters.status  || filterStatus
+
   const tiles = {
-    dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    light: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+    dark:      'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    light:     'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
     satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   }
 
   const filtered = reports.filter(r => {
-    if (filterElement !== 'all' && r.element !== filterElement) return false
-    if (filterStatus !== 'all' && r.status !== filterStatus) return false
+    if (effectiveElement !== 'all' && r.element !== effectiveElement) return false
+    if (effectiveStatus  !== 'all' && r.status  !== effectiveStatus)  return false
     return r.coords != null
   })
 
-  const usedElements = regulationData.filter(el => reports.some(r => r.element === el.id))
+  const usedElements     = regulationData.filter(el => reports.some(r => r.element === el.id))
   const activeLayerCount = Object.values(activeLayers).filter(Boolean).length
                          + Object.values(activeDynamicLayers).filter(Boolean).length
+  const hasAiOverride    = aiFilters.element || aiFilters.status || aiMapLabel || heatmapPoints?.length
 
   return (
     <div className="space-y-4">
@@ -213,6 +125,15 @@ export default function GISMap() {
           <p className="text-slate-500 dark:text-gray-500 text-sm mt-0.5">{'نظام المعلومات الجغرافية · أمانة الباحة'}</p>
         </div>
         <div className="flex items-center gap-2">
+          {hasAiOverride && (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 text-indigo-700 dark:text-indigo-300 text-xs font-medium">
+              <Bot size={13} />
+              <span>{aiMapLabel || 'عرض ذكاء اصطناعي'}</span>
+              <button onClick={clearAiMapState} className="hover:text-indigo-900 dark:hover:text-white transition-colors">
+                <X size={12} />
+              </button>
+            </div>
+          )}
           <button onClick={() => setShowLayers(!showLayers)}
             className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-all relative ${showLayers || activeLayerCount > 0 ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/30 text-blue-600 dark:text-blue-400' : 'bg-white dark:bg-gray-900 border-slate-200 dark:border-gray-700 text-slate-600 dark:text-gray-400'}`}>
             <Layers size={14} />
@@ -234,20 +155,18 @@ export default function GISMap() {
       {/* Layers panel */}
       {showLayers && (
         <div className={`${card} rounded-xl p-4 space-y-4`}>
-          {/* Static reference layers */}
+          {/* Analytical heat layer */}
           <div>
-            <p className="text-xs font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wide mb-3">{'طبقات مرجعية'}</p>
+            <p className="text-xs font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wide mb-3">{'طبقات تحليلية'}</p>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {LAYER_CONFIG.map(({ id, label, color, desc }) => (
-                <button key={id} onClick={() => toggleLayer(id)}
-                  className={`flex items-start gap-2.5 p-3 rounded-lg border text-right transition-all ${activeLayers[id] ? 'border-blue-300 dark:border-blue-500/50 bg-blue-50 dark:bg-blue-500/10' : 'border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-800/50'}`}>
-                  <div className="w-3 h-3 rounded-sm flex-shrink-0 mt-0.5" style={{ background: color, opacity: activeLayers[id] ? 1 : 0.4 }} />
-                  <div>
-                    <p className={`text-xs font-medium ${activeLayers[id] ? 'text-blue-700 dark:text-blue-300' : 'text-slate-600 dark:text-gray-400'}`}>{label}</p>
-                    <p className="text-xs text-slate-400 dark:text-gray-600 mt-0.5">{desc}</p>
-                  </div>
-                </button>
-              ))}
+              <button onClick={() => toggleLayer('heat')}
+                className={`flex items-start gap-2.5 p-3 rounded-lg border text-right transition-all ${activeLayers.heat ? 'border-blue-300 dark:border-blue-500/50 bg-blue-50 dark:bg-blue-500/10' : 'border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-800/50'}`}>
+                <div className="w-3 h-3 rounded-sm flex-shrink-0 mt-0.5" style={{ background: '#F59E0B', opacity: activeLayers.heat ? 1 : 0.4 }} />
+                <div>
+                  <p className={`text-xs font-medium ${activeLayers.heat ? 'text-blue-700 dark:text-blue-300' : 'text-slate-600 dark:text-gray-400'}`}>{'طبقة حرارية'}</p>
+                  <p className="text-xs text-slate-400 dark:text-gray-600 mt-0.5">{'كثافة البلاغات'}</p>
+                </div>
+              </button>
             </div>
           </div>
 
@@ -289,7 +208,9 @@ export default function GISMap() {
       {/* Toolbar */}
       <div className={`${card} rounded-xl p-3 flex flex-wrap items-center gap-3`}>
         <Filter size={14} className="text-slate-400 dark:text-gray-500" />
-        <select value={filterElement} onChange={e => setFilterElement(e.target.value)}
+        <select
+          value={effectiveElement}
+          onChange={e => { setFilterElement(e.target.value); if (aiFilters.element) clearAiMapState() }}
           className="bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-gray-300 focus:outline-none focus:border-blue-500 cursor-pointer">
           <option value="all">{'كل العناصر'} ({reports.length})</option>
           {regulationData.map(e => {
@@ -297,7 +218,9 @@ export default function GISMap() {
             return count > 0 ? <option key={e.id} value={e.id}>{e.name} ({count})</option> : null
           })}
         </select>
-        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+        <select
+          value={effectiveStatus}
+          onChange={e => { setFilterStatus(e.target.value); if (aiFilters.status) clearAiMapState() }}
           className="bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-gray-300 focus:outline-none focus:border-blue-500 cursor-pointer">
           <option value="all">{'كل الحالات'}</option>
           {Object.entries(statusConfig).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
@@ -329,18 +252,10 @@ export default function GISMap() {
           <MapContainer center={[20.0131, 41.4677]} zoom={13} style={{ width: '100%', height: '100%' }} zoomControl={false}>
             <TileLayer url={tiles[mapStyle]} attribution='&copy; CartoDB' />
 
-            {/* GIS Layers */}
-            {activeLayers.districts && (
-              <GeoJSON key="districts" data={DISTRICTS_GEOJSON} style={districtStyle} onEachFeature={onEachDistrict} />
-            )}
-            {activeLayers.priority && (
-              <GeoJSON key="priority" data={PRIORITY_GEOJSON} style={priorityStyle} onEachFeature={onEachPriority} />
-            )}
-            {activeLayers.contracts && (
-              <GeoJSON key="contracts" data={CONTRACTS_GEOJSON} style={contractStyle} onEachFeature={onEachContract} />
-            )}
+            {/* AI-driven viewport controller */}
+            <FitBoundsController bounds={aiBounds} />
 
-            {/* Dynamic operational layers from DB */}
+            {/* Dynamic operational layers loaded from DB */}
             {dynamicLayers.map(layer =>
               activeDynamicLayers[layer.id] && layer.featureCollection?.features?.length > 0 ? (
                 <GeoJSON
@@ -374,10 +289,16 @@ export default function GISMap() {
               </MarkerClusterGroup>
             )}
 
-            {/* Heat layer */}
+            {/* Local density heat layer (manual toggle) */}
             {activeLayers.heat && filtered.map(r => (
               <Circle key={`h-${r.id}`} center={r.coords || [20.0131, 41.4677]} radius={700}
                 pathOptions={{ fillColor: r.elementColor || '#3B82F6', fillOpacity: 0.07, color: r.elementColor || '#3B82F6', weight: 1, opacity: 0.25 }} />
+            ))}
+
+            {/* AI-driven heatmap points (from copilot spatial analysis) */}
+            {heatmapPoints?.map((pt, i) => (
+              <Circle key={`ai-heat-${i}`} center={[pt.lat, pt.lng]} radius={600}
+                pathOptions={{ fillColor: '#EF4444', fillOpacity: 0.12, color: '#EF4444', weight: 0.5, opacity: 0.3 }} />
             ))}
           </MapContainer>
 
@@ -395,14 +316,12 @@ export default function GISMap() {
           </div>
 
           {/* Active layer badges */}
-          {activeLayerCount > 0 && (
+          {activeLayers.heat && (
             <div className="absolute bottom-4 left-4 z-[500] flex flex-wrap gap-1.5">
-              {LAYER_CONFIG.filter(l => activeLayers[l.id]).map(l => (
-                <span key={l.id} className="flex items-center gap-1 bg-white/90 dark:bg-gray-900/90 border border-slate-200 dark:border-gray-700 rounded-full px-2 py-0.5 text-xs text-slate-600 dark:text-gray-300 shadow backdrop-blur-sm">
-                  <span className="w-2 h-2 rounded-full" style={{ background: l.color }} />
-                  {l.label}
-                </span>
-              ))}
+              <span className="flex items-center gap-1 bg-white/90 dark:bg-gray-900/90 border border-slate-200 dark:border-gray-700 rounded-full px-2 py-0.5 text-xs text-slate-600 dark:text-gray-300 shadow backdrop-blur-sm">
+                <span className="w-2 h-2 rounded-full" style={{ background: '#F59E0B' }} />
+                {'طبقة حرارية'}
+              </span>
             </div>
           )}
         </div>

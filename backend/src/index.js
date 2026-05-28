@@ -10,6 +10,7 @@ import ingestionRouter from './routes/ingestion.js'
 import observationsRouter from './routes/observations.js'
 import duplicatesRouter from './routes/duplicates.js'
 import notificationsRouter from './routes/notifications.js'
+import assistantRouter from './routes/assistant.js'
 import { authMiddleware } from './middleware/auth.js'
 
 const app = express()
@@ -36,6 +37,7 @@ app.use('/api/ingestion', authMiddleware, ingestionRouter)
 app.use('/api/observations', authMiddleware, observationsRouter)
 app.use('/api/duplicates', authMiddleware, duplicatesRouter)
 app.use('/api/notifications', authMiddleware, notificationsRouter)
+app.use('/api/assistant',    authMiddleware, assistantRouter)
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ error: 'Not found' }))
