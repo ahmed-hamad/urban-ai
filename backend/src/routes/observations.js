@@ -6,6 +6,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import path from 'path'
 import { readFile } from 'fs/promises'
+import xlsx from 'xlsx'
 import { requirePermission } from '../middleware/auth.js'
 import { query, getClient } from '../services/db.js'
 import { processGeoJSON, processShapefile } from '../services/ingestion/gisProcessor.js'
@@ -80,6 +81,78 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
   res.json({ layer, observations: obsRes.rows })
 })
 
+// ─── Excel processor ─────────────────────────────────────────────────────────
+
+function processExcel(filePath, fieldMapping) {
+  const wb    = xlsx.readFile(filePath, { cellDates: true })
+  const sheet = wb.Sheets[wb.SheetNames[0]]
+  const rows  = xlsx.utils.sheet_to_json(sheet, { defval: null })
+
+  const dateCol    = fieldMapping.dateColumn    || null
+  const elementCol = fieldMapping.elementColumn || null
+  const latCol     = fieldMapping.latColumn     || null
+  const lngCol     = fieldMapping.lngColumn     || null
+  const descCol    = fieldMapping.descColumn    || null
+  const locCol     = fieldMapping.locColumn     || null
+
+  const features  = []
+  let valid = 0, invalid = 0
+
+  for (const row of rows) {
+    const rawElement = elementCol ? row[elementCol] : null
+    if (!rawElement) { invalid++; continue }
+
+    const elementType  = String(rawElement).trim()
+    const observedAt   = dateCol && row[dateCol] ? parseSafeDate(String(row[dateCol])) : null
+    const lat          = latCol  && row[latCol]  != null ? parseFloat(row[latCol])  : null
+    const lng          = lngCol  && row[lngCol]  != null ? parseFloat(row[lngCol])  : null
+    const hasCoords    = lat != null && !isNaN(lat) && lng != null && !isNaN(lng)
+
+    features.push({
+      isValidGeometry: hasCoords,
+      geometry: hasCoords ? { type: 'Point', coordinates: [lng, lat] } : null,
+      centroidLat: hasCoords ? lat : null,
+      centroidLng: hasCoords ? lng : null,
+      mappedOperational: {
+        elementType,
+        observationDate: observedAt,
+        description:   descCol ? (row[descCol] ? String(row[descCol]) : null) : null,
+        locationName:  locCol  ? (row[locCol]  ? String(row[locCol])  : null) : null,
+      },
+      sourceAttributes: row,
+    })
+    valid++
+  }
+
+  return {
+    features,
+    totalCount:   rows.length,
+    validCount:   valid,
+    invalidCount: invalid,
+    headers:      rows.length > 0 ? Object.keys(rows[0]) : [],
+  }
+}
+
+// ─── Preview Excel headers (no import) ───────────────────────────────────────
+
+router.post('/preview-headers', requirePermission('gis_access'), upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'الملف مطلوب' })
+  const ext = path.extname(req.file.originalname).toLowerCase()
+  if (ext !== '.xlsx' && ext !== '.xls') {
+    return res.status(400).json({ error: 'يدعم هذا المسار ملفات Excel فقط' })
+  }
+  try {
+    const wb      = xlsx.readFile(req.file.path, { cellDates: true })
+    const sheet   = wb.Sheets[wb.SheetNames[0]]
+    const rows    = xlsx.utils.sheet_to_json(sheet, { defval: null })
+    const headers = rows.length > 0 ? Object.keys(rows[0]) : []
+    const preview = rows.slice(0, 3)
+    res.json({ headers, preview, rowCount: rows.length })
+  } catch (err) {
+    res.status(422).json({ error: `خطأ في قراءة الملف: ${err.message}` })
+  }
+})
+
 // ─── Upload + import observation file ────────────────────────────────────────
 
 router.post('/upload', requirePermission('gis_access'), upload.single('file'), async (req, res) => {
@@ -99,8 +172,13 @@ router.post('/upload', requirePermission('gis_access'), upload.single('file'), a
       result = await processGeoJSON(req.file.path, fm)
     } else if (ext === '.shp') {
       result = await processShapefile(req.file.path, fm)
+    } else if (ext === '.xlsx' || ext === '.xls') {
+      if (!fm.elementColumn) {
+        return res.status(400).json({ error: 'يجب تحديد عمود اسم العنصر (elementColumn) لملفات Excel' })
+      }
+      result = processExcel(req.file.path, fm)
     } else {
-      return res.status(400).json({ error: 'الصيغة غير مدعومة. استخدم GeoJSON أو Shapefile' })
+      return res.status(400).json({ error: 'الصيغة غير مدعومة. استخدم Excel أو GeoJSON أو Shapefile' })
     }
   } catch (err) {
     return res.status(422).json({ error: `خطأ في قراءة الملف: ${err.message}` })
@@ -133,7 +211,7 @@ router.post('/upload', requirePermission('gis_access'), upload.single('file'), a
     layer = lay
 
     for (const f of result.features) {
-      if (!f.isValidGeometry || !f.geometry) continue
+      if (!f.geometry && !f.mappedOperational?.elementType) continue
       const mo = f.mappedOperational || {}
 
       await client.query(
@@ -142,14 +220,17 @@ router.post('/upload', requirePermission('gis_access'), upload.single('file'), a
             source_id, element_type, description, location_name, district,
             observed_at, severity, source_attributes)
          VALUES ($1, $2::uuid,
-           ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON($3), 4326)),
+           CASE WHEN $3::text IS NOT NULL
+                THEN ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON($3::text), 4326))
+                ELSE NULL
+           END,
            $4::double precision, $5::double precision,
            $6, $7, $8, $9, $10, $11, $12, $13)`,
         [
           layer.id,
           resolvedEntityId || null,
-          JSON.stringify(f.geometry),
-          f.centroidLat, f.centroidLng,
+          f.geometry ? JSON.stringify(f.geometry) : null,
+          f.centroidLat ?? null, f.centroidLng ?? null,
           mo.externalId || f.sourceFeatureId || null,
           mo.elementType || null,
           mo.description || null,

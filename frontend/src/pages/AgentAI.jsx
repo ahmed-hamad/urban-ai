@@ -91,26 +91,80 @@ function DataTable({ columns, rows }) {
   )
 }
 
-// ─── Text renderer (bold, list items, alerts) ─────────────────────────────────
+// ─── Text renderer — handles bold, lists, headings, alerts, markdown tables ────
 function renderText(text) {
   if (!text) return null
-  return text.split('\n').map((line, i) => {
-    if (line.startsWith('**') && line.endsWith('**'))
-      return <p key={i} className="font-bold text-white my-1">{line.replace(/\*\*/g, '')}</p>
-    if (line.includes('**')) {
-      const parts = line.split(/\*\*(.*?)\*\*/g)
+
+  // Split into segments: markdown-table blocks vs regular text
+  const segments = []
+  let textLines = []
+  for (const line of text.split('\n')) {
+    if (line.trim().startsWith('|')) {
+      if (textLines.length) { segments.push({ type: 'text', lines: textLines }); textLines = [] }
+      const prev = segments[segments.length - 1]
+      if (prev?.type === 'table') prev.lines.push(line.trim())
+      else segments.push({ type: 'table', lines: [line.trim()] })
+    } else {
+      textLines.push(line)
+    }
+  }
+  if (textLines.length) segments.push({ type: 'text', lines: textLines })
+
+  return segments.map((seg, si) => {
+    if (seg.type === 'table') {
+      // Filter separator rows (e.g. |:---:|:---|) and parse
+      const dataRows = seg.lines
+        .filter(l => !l.match(/^\|[\s\-:|]+\|$/))
+        .map(l => l.split('|').slice(1, -1).map(c => c.trim()))
+      if (dataRows.length < 1) return null
+      const [headers, ...bodyRows] = dataRows
       return (
-        <p key={i} className="text-gray-300 text-sm leading-relaxed">
-          {parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-white">{p}</strong> : p)}
-        </p>
+        <div key={si} className="overflow-x-auto rounded-xl border border-gray-700/50 my-2">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-700/50 bg-gray-800/60">
+                {headers.map((h, j) => (
+                  <th key={j} className="text-right px-3 py-2 text-gray-300 font-semibold whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {bodyRows.map((row, j) => (
+                <tr key={j} className="border-b border-gray-700/30 last:border-0 hover:bg-gray-800/40 transition-colors">
+                  {row.map((cell, k) => (
+                    <td key={k} className="px-3 py-2 text-gray-300 whitespace-nowrap">{cell}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )
     }
-    if (line.startsWith('- ') || line.match(/^\d+\.\s/))
-      return <li key={i} className="text-gray-300 text-sm mr-4 leading-relaxed">{line.replace(/^[-\d]+\.?\s/, '')}</li>
-    if (line.startsWith('⚠️') || line.startsWith('🔒') || line.startsWith('ℹ️'))
-      return <p key={i} className="text-amber-400 text-xs bg-amber-500/10 rounded-lg px-3 py-2 border border-amber-500/20 my-1">{line}</p>
-    if (line.trim() === '') return <br key={i} />
-    return <p key={i} className="text-gray-300 text-sm leading-relaxed">{line}</p>
+
+    return seg.lines.map((line, i) => {
+      const key = `${si}-${i}`
+      if (!line.trim()) return <br key={key} />
+      if (line.match(/^#{1,3}\s/))
+        return <p key={key} className="font-semibold text-white text-sm mt-2 mb-0.5">{line.replace(/^#{1,3}\s+/, '')}</p>
+      if (line.match(/^---+$/))
+        return <hr key={key} className="border-gray-700/50 my-2" />
+      if (line.startsWith('**') && line.endsWith('**'))
+        return <p key={key} className="font-bold text-white my-1">{line.replace(/\*\*/g, '')}</p>
+      if (line.includes('**')) {
+        const parts = line.split(/\*\*(.*?)\*\*/g)
+        return (
+          <p key={key} className="text-gray-300 text-sm leading-relaxed">
+            {parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-white">{p}</strong> : p)}
+          </p>
+        )
+      }
+      if (line.startsWith('- ') || line.match(/^\d+\.\s/))
+        return <li key={key} className="text-gray-300 text-sm mr-4 leading-relaxed">{line.replace(/^[-\d]+\.?\s/, '')}</li>
+      if (line.startsWith('⚠️') || line.startsWith('🔒') || line.startsWith('ℹ️'))
+        return <p key={key} className="text-amber-400 text-xs bg-amber-500/10 rounded-lg px-3 py-2 border border-amber-500/20 my-1">{line}</p>
+      return <p key={key} className="text-gray-300 text-sm leading-relaxed">{line}</p>
+    })
   })
 }
 

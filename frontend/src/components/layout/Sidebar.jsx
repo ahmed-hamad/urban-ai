@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import {
   LayoutDashboard, ClipboardList, MapPin, TrendingUp,
   Users, Shield, ChevronRight, ChevronLeft, FileText, ScanSearch, LogOut, Circle, Network,
-  Inbox, Layers, ListChecks, Eye, GitMerge, Bot,
+  Inbox, Layers, ListChecks, Eye, GitMerge, Bot, Activity,
 } from 'lucide-react'
 import { useData } from '@/context/DataContext'
 import { useReportScope } from '@/hooks/useReportScope'
@@ -23,11 +23,12 @@ const NAV_ITEMS = [
   { path: '/entities',   label: 'الهيكل التنظيمي',  Icon: Network,         desc: 'إدارة الجهات والوحدات',        allowedRoles: ['admin', 'executive', 'auditor', 'manager'] },
   { path: '/users',      label: 'المستخدمون',       Icon: Users,           desc: 'إدارة الفريق',                 allowedRoles: ['admin', 'executive', 'manager'] },
   { path: '/audit',      label: 'سجل التدقيق',      Icon: Shield,          desc: 'تتبع الأنشطة',                 allowedRoles: ['admin', 'executive', 'auditor', 'manager', 'monitor'] },
-  { path: '/ingestion',  label: 'بلاغات من الوسائط', Icon: Inbox,           desc: 'رفع صور وفيديو → مراجعة → بلاغ', allowedRoles: ['admin', 'executive', 'manager', 'monitor'] },
   { path: '/gis-import', label: 'استيراد GIS',       Icon: Layers,          desc: 'Shapefile · GeoJSON → بلاغات', allowedRoles: ['admin', 'executive', 'manager'] },
   { path: '/gis-intake',    label: 'مراجعة عناصر GIS',   Icon: ListChecks, desc: 'قائمة المراجعة → تأكيد → بلاغ',      allowedRoles: ['admin', 'executive', 'manager'] },
   { path: '/observations', label: 'مشاهدات خارجية',     Icon: Eye,        desc: 'عدسة بلدي · مسوحات → تحليل',         allowedRoles: ['admin', 'executive', 'manager'] },
   { path: '/duplicates',   label: 'تحليل التكرار',       Icon: GitMerge,   desc: 'كشف التكرار المكاني والزمني',          allowedRoles: ['admin', 'executive', 'manager', 'auditor'] },
+  { path: '/vpi',          label: 'مؤشر التشوه البصري', Icon: Activity,   desc: 'VPI · لوحة تنفيذية · KPI شهري',       allowedRoles: ['admin', 'executive', 'auditor', 'manager'] },
+  { path: '/eoi',          label: 'ذكاء الرصد الخارجي', Icon: Eye,        desc: 'رصد بلدي · VPI تقديري · إنذار مبكر',  allowedRoles: ['admin', 'executive', 'auditor', 'manager'] },
 ]
 
 export default function Sidebar({ collapsed, onToggle }) {

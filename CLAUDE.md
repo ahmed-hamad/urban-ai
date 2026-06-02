@@ -216,40 +216,36 @@ Human validation is mandatory.
 
 ---
 
-# AI Governance Rules
+# AI Agent behavior:
 
-AI architecture must follow:
+RAG + GIS + Analytics + Operational Intelligence Assistant
 
-Frontend
-→ Backend API
-→ AI Service
-→ Queue
-→ Inference
-→ Human Validation
+The AI assistant must understand:
 
-Never:
+* GIS layers
+* report workflows
+* operational KPIs
+* VPI analytics
+* forecast analytics
+* coverage analytics
+* executive dashboards
+* municipality performance
+* priority zone performance
+* spatial intersections
 
-* integrate YOLO directly into frontend logic
-* allow AI autonomous enforcement
-* allow AI workflow transitions
-* allow AI to bypass human approval
+AI responses must always respect RBAC.
 
-AI services must support:
+The AI assistant must use:
 
-* YOLO
-* frame extraction
-* inference queues
-* model pipelines
-* future fine-tuning
-* future segmentation models
-* spatial AI enrichment
+* governed analytics tables
+* governed GIS services
+* governed KPI engines
 
-AI Agent behavior:
+Never generate unsupported KPI values.
 
-RAG + GIS + Analytics Assistant
+Never hallucinate analytics.
 
-NOT a generic chatbot.
-
+Never bypass scope restrictions.
 ---
 
 # Interactive Map Rules
@@ -345,5 +341,116 @@ UrbanAI is evolving toward:
 * AI-Assisted Municipal Enforcement System
 * Operational GIS Platform
 * Smart City Governance Infrastructure
+
+
+---
+
+# VPI Analytics Governance
+
+VPI is an official KPI engine.
+
+Official VPI may only be calculated from:
+
+* Official Monthly Observation Datasets
+* Official Monthly Coverage Datasets
+
+Official KPI calculations must support:
+
+* Amanah VPI
+* Municipality VPI
+* Priority Zone VPI
+* Element VPI
+
+All KPI calculations must be snapshot-based.
+
+Monthly snapshots are immutable.
+
+Never overwrite historical KPI periods.
+
+Support:
+
+* target management
+* historical comparisons
+* trend analysis
+* contribution analysis
+* executive reporting
+
+Coverage calculations must use:
+
+Covered Area (km²)
+
+The field:
+المساحة (كم2)
+
+is the official covered area measurement.
+
+VPI and Coverage targets must be configurable.
+
+Never hardcode KPI targets.
+
+---
+
+# Forecast Governance Rules
+
+Forecast analytics are operational estimates.
+
+Forecast values are NOT official KPI values.
+
+Forecast calculations must remain isolated from:
+
+* official VPI datasets
+* official KPI tables
+* official reports
+
+Forecast engines may use:
+
+* daily observations
+* coverage progress
+* historical trends
+* estimation rules
+
+Forecast outputs must be labeled:
+
+* Estimated
+* Forecast
+* Predicted
+
+Never present forecast values as official KPI values.
+
+Official KPI values always take precedence.
+
+---
+
+# Operational Intelligence Rules
+
+Operational Intelligence is a governed analytics domain.
+
+Operational Intelligence must support:
+
+* visit analytics
+* closure analytics
+* in-progress analytics
+* stalled reports
+* repeated observations
+* operational KPIs
+* executive insights
+
+Operational Intelligence datasets must remain separate from:
+
+* official reports
+* workflow records
+* KPI snapshots
+
+Support:
+
+* municipality analysis
+* priority zone analysis
+* element analysis
+* lifecycle analysis
+* operational performance metrics
+
+---
+
+
 
 All future engineering decisions must preserve this direction.

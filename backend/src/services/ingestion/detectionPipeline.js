@@ -62,21 +62,29 @@ const VIOLATION_TYPE_IDS = new Set(VIOLATION_TYPES.map(t => t.id))
 
 function buildDetectionPrompt() {
   const typeList = VIOLATION_TYPES.map(t => `  ${t.id} — ${t.name}`).join('\n')
-  return `أنت نظام كشف مخالفات بصرية لمنصة أمانة الباحة للرصد البلدي الميداني.
+  return `أنت نظام كشف عناصر التشوه البصري لمنصة أمانة الباحة للرصد البلدي الميداني.
 
-حلّل هذه الصورة الميدانية وحدّد أي مخالفات أو تشوهات بصرية واضحة فيها.
+حلّل هذه الصورة الميدانية وحدّد أي عناصر تشوه بصري واضحة فيها.
 
-أنواع المخالفات المعتمدة (استخدم ID بالضبط):
+أنواع العناصر المعتمدة (استخدم ID بالضبط):
 ${typeList}
 
-لكل مخالفة مكتشفة في الصورة أعد كائن JSON بهذا الشكل الدقيق:
-{"element_type": "<id>", "label": "<وصف قصير بالعربية للمخالفة>", "confidence": <0.0-1.0>, "notes": "<ملاحظة اختيارية>"}
+لكل عنصر مكتشف في الصورة أعد كائن JSON بهذا الشكل الدقيق:
+{"element_type": "<id>", "label": "<وصف قصير بالعربية>", "confidence": <0.0-1.0>, "bbox": [<x%>, <y%>, <w%>, <h%>], "notes": "<ملاحظة اختيارية>"}
+
+حقل bbox إلزامي: يحدد موضع العنصر في الصورة كنسبة مئوية (0–100):
+- x%: المسافة من اليسار للحافة اليسرى للعنصر
+- y%: المسافة من الأعلى للحافة العلوية للعنصر
+- w%: عرض العنصر
+- h%: ارتفاع العنصر
+مثال: عنصر يشغل الربع العلوي الأيسر: [0, 0, 50, 50]
 
 القواعد:
 - أعد فقط JSON array صالح، لا نص إضافي
-- إذا لم تجد مخالفات واضحة أعد: []
-- لا تُدرج مخالفات بثقة أقل من 0.4
-- يمكن إدراج أكثر من مخالفة في نفس الصورة`
+- إذا لم تجد عناصر واضحة أعد: []
+- لا تُدرج عناصر بثقة أقل من 0.4
+- يمكن إدراج أكثر من عنصر في نفس الصورة
+- كن دقيقاً في تحديد bbox لكل عنصر بشكل مستقل`
 }
 
 // Analyze a single image file with Claude Vision.
@@ -166,6 +174,13 @@ export async function analyzeImage(mediaIngestionId, filePath, options = {}) {
         ? String(Math.min(1, Math.max(0, det.confidence)))
         : null
 
+      // Validate and normalise bbox: must be [x, y, w, h] with all values 0-100
+      let bbox = null
+      if (Array.isArray(det.bbox) && det.bbox.length === 4 &&
+          det.bbox.every(v => typeof v === 'number' && v >= 0 && v <= 100)) {
+        bbox = det.bbox.map(v => Math.round(v * 10) / 10)
+      }
+
       const { rows: [candidate] } = await query(
         `INSERT INTO detection_candidates
            (media_ingestion_id, detection_source, detection_model, detection_confidence,
@@ -191,6 +206,16 @@ export async function analyzeImage(mediaIngestionId, filePath, options = {}) {
           options.gpsLng ?? null,
         ],
       )
+
+      // Store bbox in a separate UPDATE so the INSERT works even before migration 022 is applied
+      if (bbox !== null) {
+        await query(
+          `UPDATE detection_candidates SET detection_bbox = $1::jsonb WHERE id = $2`,
+          [JSON.stringify(bbox), candidate.id],
+        ).catch(() => {
+          // Column doesn't exist yet — run database/migrations/022_detection_bbox.sql
+        })
+      }
       candidateIds.push(candidate.id)
     }
 

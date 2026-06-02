@@ -205,6 +205,10 @@ router.post('/', requirePermission('create_report'), async (req, res) => {
     candidateId,
   } = req.body
 
+  // Derive notice-period fields from violations_data (set by frontend based on regulation articles)
+  const hasNoticePeriod = !!(violations_data?.hasNoticePeriod)
+  const correctionDays  = violations_data?.correctionDays ? parseInt(violations_data.correctionDays) : null
+
   const entityId = entity_id || req.user.entityId
 
   if (!coords || !Array.isArray(coords) || coords.length !== 2) {
@@ -236,10 +240,12 @@ router.post('/', requirePermission('create_report'), async (req, res) => {
         district, location_name, gps_lat, gps_lng, created_by, report_number,
         monitoring_source, priority, violations_data,
         estimated_fine, violator_name, violator_id, violator_type,
+        has_notice_period, correction_days,
         location)
      VALUES ($1,$2,$3::uuid,$4,$4,'draft',$5,$6,$7,
              $8::double precision,$9::double precision,$10,$11,$12,$13,
              $14::jsonb,$15::numeric,$16,$17,$18,
+             $19,$20::integer,
        CASE
          WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
          THEN ST_SetSRID(ST_MakePoint($9::double precision,$8::double precision),4326)
@@ -252,6 +258,7 @@ router.post('/', requirePermission('create_report'), async (req, res) => {
       latStr, lngStr, req.user.id, reportNumber,
       monitoring_source || null, priority || null,
       violationsJson, fineVal, violator_name || null, violator_id || null, violator_type || null,
+      hasNoticePeriod, correctionDays,
     ],
   )
 

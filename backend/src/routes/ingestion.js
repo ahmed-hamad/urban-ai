@@ -411,9 +411,10 @@ router.get('/candidates', requirePermission('view_reports'), async (req, res) =>
              OR (dc.entity_id IS NULL
                  AND mi.uploaded_by IN (SELECT id FROM users WHERE entity_id = $${params.length})))`
   }
-  if (scope.type === 'user')   { params.push(scope.userId);   sql += ` AND mi.uploaded_by = $${params.length}` }
-  if (review_status)           { params.push(review_status);  sql += ` AND dc.review_status = $${params.length}` }
-  if (element_type)            { params.push(element_type);   sql += ` AND dc.suggested_element_type = $${params.length}` }
+  if (scope.type === 'user')         { params.push(scope.userId);              sql += ` AND mi.uploaded_by = $${params.length}` }
+  if (review_status)                 { params.push(review_status);             sql += ` AND dc.review_status = $${params.length}` }
+  if (element_type)                  { params.push(element_type);              sql += ` AND dc.suggested_element_type = $${params.length}` }
+  if (req.query.media_ingestion_id)  { params.push(req.query.media_ingestion_id); sql += ` AND dc.media_ingestion_id = $${params.length}` }
 
   params.push(Number(limit), Number(offset))
   sql += ` ORDER BY mi.capture_timestamp DESC NULLS LAST, dc.created_at DESC

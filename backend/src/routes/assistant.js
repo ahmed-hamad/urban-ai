@@ -16,6 +16,8 @@ import {
   getElementTypes,
 } from '../services/analyticsService.js'
 import { getDuplicateStats } from '../services/duplicateDetection.js'
+import { getVPIForAI, getAvailableMonths } from '../services/vpiService.js'
+import { getEOIForAI, getAvailableEOIMonths } from '../services/eoiService.js'
 
 const router  = Router()
 const API_KEY = process.env.ANTHROPIC_API_KEY
@@ -122,6 +124,54 @@ const TOOLS = [
       properties: {},
     },
   },
+  {
+    name: 'get_vpi_kpi',
+    description: 'Query the Visual Pollution Index (VPI / مؤشر التشوه البصري) KPI engine. Use for ALL questions about VPI, coverage, municipality/element/zone contributions, monthly trends, target comparisons. VPI = total_units / covered_area_km2. This is independent from the reports workflow — uses monthly Excel snapshot data. query_type options: "summary" (default), "trend", "municipalities", "elements", "zones".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        month: {
+          type: 'string',
+          description: 'Month in YYYY-MM format (e.g. "2026-05"). Omit to use the latest available month.',
+        },
+        municipality_name: {
+          type: 'string',
+          description: 'Arabic municipality name for municipality-scoped queries.',
+        },
+        query_type: {
+          type: 'string',
+          enum: ['summary', 'trend', 'municipalities', 'elements', 'zones'],
+          description: '"summary" = Amanah overview. "trend" = 12-month history. "municipalities" = top 10. "elements" = top 10 elements. "zones" = top 10 priority zones.',
+        },
+      },
+    },
+  },
+  {
+    name: 'get_vpi_available_months',
+    description: 'List all months for which VPI (مؤشر التشوه البصري) data has been uploaded. Always call this before querying VPI data to see what months are available.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_eoi_data',
+    description: 'Query External Observation Intelligence (ذكاء الرصد الخارجي) — operational data from Balady Lens and external monitoring systems. Handles: operational summary, visit status, in-progress analysis, stalled reports, repeated observations, live VPI estimates, early warning, executive summary. ALL VPI values from this source are ESTIMATED/FORECAST — not official. Use query_type to focus the query.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        month: { type: 'string', description: 'Month in YYYY-MM format. Omit for latest.' },
+        municipality_name: { type: 'string', description: 'Arabic municipality name for scoped queries.' },
+        query_type: {
+          type: 'string',
+          enum: ['summary', 'visit_status', 'in_progress', 'repeated', 'early_warning', 'breakdown', 'live_vpi'],
+          description: '"summary" = operational overview. "visit_status" = visit compliance. "in_progress" = delayed reports. "repeated" = recurrent observations. "early_warning" = live+forecast VPI. "breakdown" = top municipalities. "live_vpi" = estimated VPI.',
+        },
+      },
+    },
+  },
+  {
+    name: 'get_eoi_months',
+    description: 'List months with external observation data. Call before get_eoi_data.',
+    input_schema: { type: 'object', properties: {} },
+  },
 ]
 
 // ─── System Prompt ────────────────────────────────────────────────────────────
@@ -169,28 +219,53 @@ function buildSystemPrompt(user, scope) {
 ### الموظف المحدد
 - عندما يسأل مدير النظام عن موظف بالاسم → استدعِ get_inspector_performance بـ inspector_name: الاسم
 
+## ذكاء الرصد الخارجي (EOI — External Observation Intelligence)
+- مصدر منفصل تماماً عن VPI الرسمي — يستخدم بيانات رصد خارجية (عدسة بلدي وغيرها)
+- قيم VPI من هذا المصدر تُسمى دائماً: تقديري / Estimated / Forecast
+- لأسئلة مثل "ما مؤشر VPI التقديري؟" أو "ما أكثر البلديات تأخيراً؟" أو "كم بلاغ قيد التنفيذ؟": استدعِ get_eoi_months أولاً ثم get_eoi_data
+- حالة الزيارة (visit_status) وحالة الإغلاق (closure_status) أبعاد تحليلية أساسية في هذه البيانات
+- البلاغات المتعثرة = قيد التنفيذ لأكثر من 30 يوماً (قابل للضبط)
+- ClusterId = مفتاح ربط GIS استراتيجي — لا يُتجاهل أبداً
+
+## مؤشر التشوه البصري (VPI — Visual Pollution Index)
+- VPI = إجمالي الوحدات / المساحة المغطاة (كم²) — لنفس النطاق والشهر
+- VPI الأمانة = مجموع وحدات الأمانة / مجموع مساحاتها المغطاة بالكيلومتر المربع
+- المساهمة % = وحدات الجهة / وحدات الأمانة × 100 (تُحسب من الوحدات فقط وليس من VPI)
+- نسبة التغطية = المساحة المغطاة / مساحة المنطقة × 100
+- لأي سؤال عن "مؤشر التشوه" أو "VPI" أو "أعلى بلدية" أو "أعلى عنصر": استدعِ get_vpi_available_months أولاً ثم get_vpi_kpi
+- لا تخلط بين VPI (محرك KPI المستقل) وبين إحصائيات بلاغات النظام (مصدران منفصلان)
+
 ## قواعد صارمة
 1. لا تولّد أرقاماً أو بيانات من عندك — استخدم الأدوات دائماً
 2. لا تتجاوز نطاق صلاحيات المستخدم
 3. إذا لم تتوفر بيانات كافية: وضّح ذلك واقترح سؤالاً بديلاً
 4. أنت مساعد تحليلي فقط — القرارات النهائية تعود للمستخدم المختص
 
-## تنسيق الرد — حصراً
+## تنسيق الرد — صارم
+
+⚠️ ابدأ ردّك مباشرةً بـ \`<RESPONSE>\` — لا تكتب أي نص قبله أو بعده.
+
+### توزيع المحتوى (إلزامي):
+- **text**: ملخص نصي مختصر 2-4 جمل فقط — **لا تضع جداول Markdown هنا أبداً**
+- **kpis**: الأرقام والمؤشرات الرئيسية (3-6 بطاقات)
+- **chart**: البيانات القابلة للرسم — اتجاه زمني → line | مقارنة → bar | توزيع → pie
+- **table**: جميع البيانات الجدولية بدلاً من جداول Markdown في text — 8 صفوف كحد أقصى
+- **mapCommand**: عند طلب عرض على خريطة أو بيانات مكانية
 
 <RESPONSE>
 {
-  "text": "نص الرد الكامل بالعربية",
-  "kpis": [{"label": "العنوان", "value": "123", "unit": "بلاغ", "trend": "+15%", "trendUp": true}],
-  "chart": {"type": "bar", "title": "عنوان", "data": [{"name": "اسم", "value": 123, "fill": "#3B82F6"}]},
-  "mapCommand": {"action": "filterAndZoom", "params": {"element": "id", "status": "status", "bounds": {"south": 0, "north": 0, "west": 0, "east": 0}, "label": "وصف"}},
-  "table": {"columns": ["العمود1", "العمود2"], "rows": [["قيمة1", "قيمة2"]]}
+  "text": "ملخص مختصر (2-4 جمل) بالعربية فقط — بدون جداول",
+  "kpis": [{"label": "عنوان", "value": "123", "unit": "بلاغ", "trend": "+15%", "trendUp": true}],
+  "chart": {"type": "line", "title": "عنوان", "data": [{"name": "يناير", "value": 38.56, "fill": "#3B82F6"}]},
+  "table": {"columns": ["العمود 1", "العمود 2", "العمود 3"], "rows": [["ق1", "ق2", "ق3"], ["ق4", "ق5", "ق6"]]},
+  "mapCommand": null
 }
 </RESPONSE>
 
 - chart.type: bar | pie | line
 - mapCommand.action: filterAndZoom | showHeatmap | filterByElement | focusMunicipality | highlightReports
-- ألوان مقترحة: #3B82F6 أزرق | #10B981 أخضر | #EF4444 أحمر | #F59E0B برتقالي | #8B5CF6 بنفسجي
-- ضع null للحقول غير المناسبة — لا تضع نقاط الخريطة في text أو kpis`
+- ألوان: #3B82F6 أزرق | #10B981 أخضر | #EF4444 أحمر | #F59E0B برتقالي | #8B5CF6 بنفسجي
+- ضع null للحقول غير المناسبة`
 }
 
 // ─── Tool executor ────────────────────────────────────────────────────────────
@@ -214,6 +289,14 @@ async function executeTool(name, input, scope) {
         return await getReportDetail({ ...input, scope })
       case 'get_element_types':
         return await getElementTypes({ scope })
+      case 'get_vpi_kpi':
+        return await getVPIForAI(input)
+      case 'get_vpi_available_months':
+        return { months: await getAvailableMonths() }
+      case 'get_eoi_data':
+        return await getEOIForAI(input)
+      case 'get_eoi_months':
+        return { months: await getAvailableEOIMonths() }
       default:
         return { error: `Unknown tool: ${name}` }
     }
@@ -225,15 +308,39 @@ async function executeTool(name, input, scope) {
 
 // ─── Response parser ──────────────────────────────────────────────────────────
 
-function parseStructuredResponse(raw) {
-  const match = raw.match(/<RESPONSE>\s*([\s\S]*?)\s*<\/RESPONSE>/i)
-  if (!match) return { text: raw }
+// Extract the "text" value from a (possibly incomplete) JSON fragment
+function extractTextField(fragment) {
+  const m = fragment.match(/"text"\s*:\s*"((?:[^"\\]|\\[\s\S])*)"/)
+  if (!m) return null
   try {
-    return JSON.parse(match[1])
+    return JSON.parse(`"${m[1]}"`)
   } catch {
-    // JSON parse failed — return raw text without the tags
-    return { text: raw.replace(/<\/?RESPONSE>/gi, '').trim() }
+    return m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
   }
+}
+
+function parseStructuredResponse(raw) {
+  // 1. Well-formed complete block
+  const fullMatch = raw.match(/<RESPONSE>\s*([\s\S]*?)\s*<\/RESPONSE>/i)
+  if (fullMatch) {
+    try {
+      return JSON.parse(fullMatch[1])
+    } catch {
+      const text = extractTextField(fullMatch[1])
+      return { text: text ?? fullMatch[1] }
+    }
+  }
+
+  // 2. Truncated response — opening tag present but no closing tag
+  const partialMatch = raw.match(/<RESPONSE>\s*([\s\S]*)/i)
+  if (partialMatch) {
+    const text = extractTextField(partialMatch[1])
+    if (text) return { text }
+  }
+
+  // 3. No RESPONSE block — strip any partial tags and return plain text
+  const cleaned = raw.replace(/<\/?RESPONSE>/gi, '').trim()
+  return { text: cleaned || raw }
 }
 
 // ─── Claude API caller ────────────────────────────────────────────────────────
@@ -248,7 +355,7 @@ async function callClaude(messages, systemPrompt) {
     },
     body: JSON.stringify({
       model:      MODEL,
-      max_tokens: 1400,
+      max_tokens: 2500,
       system:     systemPrompt,
       tools:      TOOLS,
       messages,

@@ -77,37 +77,68 @@ export async function scanObservationLayer(layerId, entityId) {
   )
 
   for (const obs of observations) {
-    if (obs.lat == null || obs.lng == null) continue
+    const hasSpatial = obs.lat != null && obs.lng != null
 
-    // Find reports within spatial + temporal window
-    const { rows: candidates } = await query(
-      `SELECT
-         r.id,
-         r.element_id,
-         r.created_at,
-         ST_Distance(
-           ST_SetSRID(ST_MakePoint($1::double precision, $2::double precision), 4326)::geography,
-           ST_SetSRID(ST_MakePoint(r.gps_lng::double precision, r.gps_lat::double precision), 4326)::geography
-         ) AS distance_m,
-         EXTRACT(EPOCH FROM ABS(r.created_at - $3::timestamptz)) / 86400.0 AS time_diff_days
-       FROM reports r
-       WHERE r.gps_lat IS NOT NULL AND r.gps_lng IS NOT NULL
-         AND r.status NOT IN ('rejected')
-         AND ST_DWithin(
-           ST_SetSRID(ST_MakePoint($1::double precision, $2::double precision), 4326)::geography,
-           ST_SetSRID(ST_MakePoint(r.gps_lng::double precision, r.gps_lat::double precision), 4326)::geography,
-           $4::double precision
-         )
-         AND ($3::timestamptz IS NULL OR
-              ABS(EXTRACT(EPOCH FROM r.created_at - $3::timestamptz)) / 86400.0 <= $5::double precision)`,
-      [obs.lng, obs.lat, obs.observed_at || null, rules.distanceM, rules.timeDays],
-    )
+    let candidates
+    if (hasSpatial) {
+      // Spatial + temporal + element matching
+      const { rows } = await query(
+        `SELECT
+           r.id,
+           r.element_id,
+           r.created_at,
+           ST_Distance(
+             ST_SetSRID(ST_MakePoint($1::double precision, $2::double precision), 4326)::geography,
+             ST_SetSRID(ST_MakePoint(r.gps_lng::double precision, r.gps_lat::double precision), 4326)::geography
+           ) AS distance_m,
+           EXTRACT(EPOCH FROM ABS(r.created_at - $3::timestamptz)) / 86400.0 AS time_diff_days
+         FROM reports r
+         WHERE r.gps_lat IS NOT NULL AND r.gps_lng IS NOT NULL
+           AND r.status NOT IN ('rejected')
+           AND ST_DWithin(
+             ST_SetSRID(ST_MakePoint($1::double precision, $2::double precision), 4326)::geography,
+             ST_SetSRID(ST_MakePoint(r.gps_lng::double precision, r.gps_lat::double precision), 4326)::geography,
+             $4::double precision
+           )
+           AND ($3::timestamptz IS NULL OR
+                ABS(EXTRACT(EPOCH FROM r.created_at - $3::timestamptz)) / 86400.0 <= $5::double precision)`,
+        [obs.lng, obs.lat, obs.observed_at || null, rules.distanceM, rules.timeDays],
+      )
+      candidates = rows
+    } else if (obs.element_type) {
+      // No GPS — match by element type + time window only (Excel data without coordinates)
+      const { rows } = await query(
+        `SELECT
+           r.id,
+           r.element_id,
+           r.created_at,
+           NULL::double precision AS distance_m,
+           EXTRACT(EPOCH FROM ABS(r.created_at - $1::timestamptz)) / 86400.0 AS time_diff_days
+         FROM reports r
+         WHERE r.status NOT IN ('rejected')
+           AND LOWER(r.element_id) = LOWER($2)
+           AND ($1::timestamptz IS NULL OR
+                ABS(EXTRACT(EPOCH FROM r.created_at - $1::timestamptz)) / 86400.0 <= $3::double precision)`,
+        [obs.observed_at || null, obs.element_type, rules.timeDays],
+      )
+      candidates = rows
+    } else {
+      continue
+    }
 
     for (const cand of candidates) {
-      const distScore    = calcDistanceScore(Number(cand.distance_m), rules.distanceM)
-      const timeScore    = calcTimeScore(Number(cand.time_diff_days ?? 0), rules.timeDays)
-      const elemScore    = calcElementScore(obs.element_type, cand.element_id)
-      const confidence   = calcConfidence(distScore, timeScore, elemScore, rules)
+      // For non-spatial matches: distance score = 0, boost time+element weights
+      const distScore  = hasSpatial ? calcDistanceScore(Number(cand.distance_m), rules.distanceM) : 0
+      const timeScore  = calcTimeScore(Number(cand.time_diff_days ?? 0), rules.timeDays)
+      const elemScore  = calcElementScore(obs.element_type, cand.element_id)
+
+      let confidence
+      if (hasSpatial) {
+        confidence = calcConfidence(distScore, timeScore, elemScore, rules)
+      } else {
+        // Non-spatial: weight time 60% + element 40%
+        confidence = 0.6 * timeScore + 0.4 * elemScore
+      }
 
       if (confidence < rules.minConfidence) continue
 
@@ -125,7 +156,7 @@ export async function scanObservationLayer(layerId, entityId) {
                scan_id = EXCLUDED.scan_id,
                scanned_at = NOW()`,
         [obs.id, cand.id, confidence, distScore, timeScore, elemScore,
-         cand.distance_m, cand.time_diff_days ?? 0, scanId],
+         cand.distance_m ?? null, cand.time_diff_days ?? 0, scanId],
       )
       inserted++
       matchedObs.add(obs.id)

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
-import { Upload, MapPin, CheckCircle, ChevronRight, ChevronLeft, X, Building2, Globe, Locate, GitBranch, HardHat, User, AlertCircle, Ban, Gavel, ScanSearch } from 'lucide-react'
+import { Upload, MapPin, CheckCircle, ChevronRight, ChevronLeft, X, Building2, Globe, Locate, GitBranch, HardHat, User, AlertCircle, Ban, Gavel, ScanSearch, Search, Clock, UserCheck, RefreshCw, RotateCcw, FileWarning } from 'lucide-react'
 import { regulationData } from '@/data/mockData'
 import { useAuth } from '@/context/AuthContext'
 import { useData } from '@/context/DataContext'
@@ -202,7 +202,10 @@ export default function ReportNew() {
     isRepeat,
   })
 
-  const [entitySuggestion, setEntitySuggestion] = useState(null)
+  const [entitySuggestion,  setEntitySuggestion]  = useState(null)
+  const [elementSearch,     setElementSearch]     = useState('')
+  const [violatorLookup,    setViolatorLookup]    = useState(null)  // { found, violator?, previousReports? }
+  const [lookingUp,         setLookingUp]         = useState(false)
   const [monitoringSources, setMonitoringSources] = useState(SYSTEM_SOURCES)
   const [customSourceInput, setCustomSourceInput] = useState('')
   const [addingCustomSource, setAddingCustomSource] = useState(false)
@@ -253,11 +256,63 @@ export default function ReportNew() {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function parsePeriodDays(period) {
+    if (!period || period === 'لا يوجد') return null
+    const m = String(period).match(/(\d+)/)
+    return m ? parseInt(m[1]) : null
+  }
+
+  const lookupViolator = async (type, key) => {
+    const trimKey = key?.trim()
+    if (!trimKey) return
+    setLookingUp(true)
+    setViolatorLookup(null)
+    try {
+      const res  = await authFetch(`/api/violators/lookup?type=${type}&key=${encodeURIComponent(trimKey)}`)
+      const data = await res?.json()
+      setViolatorLookup(data?.found ? data : { found: false })
+      if (data?.found) {
+        const d = data.violator.data || {}
+        if (type === 'establishment') {
+          set('violatorData', {
+            ...form.violatorData,
+            establishmentName: d.establishmentName || form.violatorData.establishmentName,
+            licenseNumber:     d.licenseNumber     || form.violatorData.licenseNumber,
+            commercialReg:     d.commercialReg     || form.violatorData.commercialReg,
+          })
+        } else if (type === 'contractor') {
+          set('violatorData', {
+            ...form.violatorData,
+            contractorName: d.contractorName || form.violatorData.contractorName,
+          })
+        } else if (type === 'beneficiary') {
+          set('violatorData', {
+            ...form.violatorData,
+            beneficiaryName:   d.beneficiaryName   || form.violatorData.beneficiaryName,
+            beneficiaryMobile: d.beneficiaryMobile || form.violatorData.beneficiaryMobile,
+          })
+        }
+      }
+    } catch { setViolatorLookup({ found: false }) }
+    finally  { setLookingUp(false) }
+  }
+
+  // Notice-period analysis from selected articles
   const selectedEl = regulationData.find(e => e.id === form.element)
   const fineTotal = form.articles.reduce((s, item) => {
     const a = selectedEl?.articles.find(x => x.id === item.id)
     return s + ((a?.fineAmana || 0) * item.count)
   }, 0)
+
+  // Derive notice-period from selected articles
+  const noticeArticles = form.articles
+    .map(item => selectedEl?.articles.find(a => a.id === item.id))
+    .filter(a => a?.notice === 'ينطبق')
+  const maxCorrectionDays = noticeArticles.reduce((mx, a) => {
+    const d = parsePeriodDays(a?.period); return (d && d > mx) ? d : mx
+  }, 0)
+  const hasNoticePeriod = noticeArticles.length > 0
 
   // Derive entity lists from DataContext; fall back to defaults
   const internalEntities = entities.filter(e => ['amana', 'municipality', 'agency', 'department'].includes(e.type))
@@ -352,6 +407,12 @@ export default function ReportNew() {
         form.violatorType === 'beneficiary'   ? form.violatorData.beneficiaryName :
         form.violatorType === 'contractor'    ? (form.violatorData.contractorName || '') : null
 
+      // Determine canonical lookup key for violator registry
+      const violatorLookupKey =
+        form.violatorType === 'establishment' ? (form.violatorData.commercialReg || form.violatorData.licenseNumber || null) :
+        form.violatorType === 'contractor'    ? (form.violatorData.contractorId   || form.violatorData.contractorName || null) :
+        form.violatorType === 'beneficiary'   ? (form.violatorData.beneficiaryId  || null) : null
+
       const body = {
         coords:             form.coords,
         element:            form.element,
@@ -366,18 +427,34 @@ export default function ReportNew() {
           violatorData:         form.violatorData,
           violationsApplicable: form.violationsApplicable,
           fineTotal,
+          hasNoticePeriod,
+          correctionDays:       maxCorrectionDays || null,
+          violatorLookupKey:    violatorLookupKey || null,
         },
         estimated_fine:  fineTotal || null,
         violator_name:   violatorName || null,
         violator_type:   form.violatorType || null,
         violator_id:     form.violatorType === 'beneficiary' ? form.violatorData.beneficiaryId : null,
-        ...(candidateId              ? { candidateId }        : {}),
-        ...(parentId                 ? { parent_id: parentId } : {}),
+        ...(candidateId ? { candidateId }          : {}),
+        ...(parentId    ? { parent_id: parentId }  : {}),
       }
 
       const res  = await authFetch('/api/reports', { method: 'POST', body: JSON.stringify(body) })
       const data = await res?.json()
       if (!res?.ok) throw new Error(data?.error || 'فشل إنشاء البلاغ')
+
+      // Persist violator data in registry (fire-and-forget)
+      if (violatorLookupKey && form.violatorType) {
+        authFetch('/api/violators/upsert', {
+          method: 'POST',
+          body:   JSON.stringify({
+            type:      form.violatorType,
+            lookupKey: violatorLookupKey,
+            name:      violatorName,
+            data:      { ...form.violatorData },
+          }),
+        }).catch(() => {})
+      }
 
       setSubmitted(true)
       setTimeout(() => navigate(parentId ? `/reports/${parentId}` : '/reports'), 2000)
@@ -530,23 +607,48 @@ export default function ReportNew() {
 
           {/* Manual Selection */}
           {(form.elementConfirmed || !searchParams.get('element')) && (
-            <div className="grid grid-cols-1 gap-2 max-h-96 overflow-y-auto">
-              {regulationData.map(el => (
-                <button key={el.id} onClick={() => { handleElementSelect(el.id); set('elementConfirmed', true) }}
-                  className={`flex items-center gap-3 p-3 rounded-xl border text-right transition-all ${form.element === el.id ? 'border-blue-400 bg-blue-50 dark:bg-blue-500/10' : 'border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-800/50'}`}>
-                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: el.color }} />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-slate-700 dark:text-gray-200">{el.name}</p>
-                    <p className="text-xs text-slate-400 dark:text-gray-600">{el.stage} · {el.articles.length} {'بند'}</p>
-                  </div>
-                  {el.maxFine > 0 && (
-                    <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">
-                      {'حتى'} {el.maxFine.toLocaleString('ar-SA')} {'﷼'}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
+            <>
+              {/* Search box */}
+              <div className="relative">
+                <Search size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-gray-500 pointer-events-none" />
+                <input
+                  value={elementSearch}
+                  onChange={e => setElementSearch(e.target.value)}
+                  placeholder="ابحث عن العنصر..."
+                  className="w-full bg-slate-50 dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-xl pr-9 pl-4 py-2.5 text-sm text-slate-700 dark:text-gray-200 placeholder-slate-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                {elementSearch && (
+                  <button onClick={() => setElementSearch('')}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-gray-300">
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+
+              {/* Filtered element list */}
+              <div className="grid grid-cols-1 gap-2 max-h-96 overflow-y-auto">
+                {regulationData
+                  .filter(el => !elementSearch || el.name.includes(elementSearch) || el.stage.includes(elementSearch))
+                  .map(el => (
+                    <button key={el.id} onClick={() => { handleElementSelect(el.id); set('elementConfirmed', true); setElementSearch('') }}
+                      className={`flex items-center gap-3 p-3 rounded-xl border text-right transition-all ${form.element === el.id ? 'border-blue-400 bg-blue-50 dark:bg-blue-500/10' : 'border-slate-200 dark:border-gray-700 hover:bg-slate-50 dark:hover:bg-gray-800/50'}`}>
+                      <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: el.color }} />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-slate-700 dark:text-gray-200">{el.name}</p>
+                        <p className="text-xs text-slate-400 dark:text-gray-600">{el.stage} · {el.articles.length} {'بند'}</p>
+                      </div>
+                      {el.maxFine > 0 && (
+                        <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">
+                          {'حتى'} {el.maxFine.toLocaleString('ar-SA')} {'﷼'}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                {regulationData.filter(el => !elementSearch || el.name.includes(elementSearch)).length === 0 && (
+                  <p className="text-sm text-slate-400 dark:text-gray-600 text-center py-6">لا توجد عناصر مطابقة</p>
+                )}
+              </div>
+            </>
           )}
         </div>
       )}
@@ -638,6 +740,42 @@ export default function ReportNew() {
                     </span>
                   </div>
                 )}
+
+                {/* ── Notice-period workflow banner ── */}
+                {form.articles.length > 0 && hasNoticePeriod && (
+                  <div className="mt-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-4 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Clock size={14} className="text-blue-600 dark:text-blue-400 flex-shrink-0" />
+                      <p className="text-sm font-semibold text-blue-700 dark:text-blue-300">
+                        مسار التنبيه — مهلة تصحيحية {maxCorrectionDays} يوم
+                      </p>
+                    </div>
+                    <p className="text-xs text-blue-600 dark:text-blue-400 leading-relaxed">
+                      بعض البنود المختارة تنطبق عليها مهلة تصحيحية وفق لائحة الجزاءات.
+                      سيخضع البلاغ بعد الإسناد لفترة إشعار مدتها <strong>{maxCorrectionDays} يوم</strong> في سلة الإشعارات.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 mt-1 text-xs">
+                      <div className="bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700 rounded-lg p-2">
+                        <p className="font-semibold text-emerald-700 dark:text-emerald-400 mb-0.5">إذا عولج قبل المهلة</p>
+                        <p className="text-emerald-600 dark:text-emerald-500">الإغلاق بدون غرامة مع التوثيق</p>
+                      </div>
+                      <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg p-2">
+                        <p className="font-semibold text-red-700 dark:text-red-400 mb-0.5">إذا لم يُعالج بعد المهلة</p>
+                        <p className="text-red-600 dark:text-red-500">توقيع الغرامة وتحويل إلى سلة الإنفاذ</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── No-notice-period → direct enforcement ── */}
+                {form.articles.length > 0 && !hasNoticePeriod && (
+                  <div className="mt-3 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-700 rounded-xl p-3 flex items-start gap-2">
+                    <FileWarning size={14} className="text-orange-600 dark:text-orange-400 flex-shrink-0 mt-0.5" />
+                    <p className="text-xs text-orange-700 dark:text-orange-400">
+                      البنود المختارة <strong>لا تتضمن مهلة تنبيه</strong> — سيتم توقيع الغرامة مباشرةً وتحويل البلاغ إلى سلة الإنفاذ عند الإغلاق.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Violator identification */}
@@ -650,7 +788,7 @@ export default function ReportNew() {
                       { id: 'contractor',    label: 'مقاول',  sub: 'مشروع داخلي أو خارجي',  Icon: HardHat },
                       { id: 'beneficiary',   label: 'مستفيد', sub: 'هوية ومعلومات شخصية',    Icon: User },
                     ].map(({ id, label, sub, Icon }) => (
-                      <button key={id} onClick={() => set('violatorType', id)}
+                      <button key={id} onClick={() => { set('violatorType', id); setViolatorLookup(null) }}
                         className={`flex flex-col items-center gap-2 p-3 rounded-xl border-2 transition-all ${form.violatorType === id ? 'border-blue-500 bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-300' : 'border-slate-200 dark:border-gray-700 text-slate-500 dark:text-gray-400 hover:bg-slate-50 dark:hover:bg-gray-800/50'}`}>
                         <Icon size={20} />
                         <p className="font-semibold text-xs">{label}</p>
@@ -658,6 +796,20 @@ export default function ReportNew() {
                       </button>
                     ))}
                   </div>
+
+                  {/* Violator lookup status badge */}
+                  {violatorLookup && (
+                    <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs ${violatorLookup.found ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300' : 'bg-slate-50 dark:bg-gray-800 border-slate-200 dark:border-gray-700 text-slate-500 dark:text-gray-400'}`}>
+                      {violatorLookup.found
+                        ? <><UserCheck size={13} /> بيانات محفوظة مسبقاً — تم ملء الحقول تلقائياً · {violatorLookup.violator?.report_count || 0} بلاغ سابق</>
+                        : <><Search size={13} /> لا توجد بيانات محفوظة لهذا المعرّف</>}
+                    </div>
+                  )}
+                  {lookingUp && (
+                    <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400 px-1">
+                      <RefreshCw size={12} className="animate-spin" /> جارٍ البحث في السجل...
+                    </div>
+                  )}
 
                   {/* Establishment form */}
                   {form.violatorType === 'establishment' && (
@@ -674,14 +826,16 @@ export default function ReportNew() {
                         <div>
                           <label className="text-xs text-slate-500 dark:text-gray-400 mb-1 block">رقم الترخيص</label>
                           <input value={form.violatorData.licenseNumber}
-                            onChange={e => set('violatorData', { ...form.violatorData, licenseNumber: e.target.value })}
+                            onChange={e => { set('violatorData', { ...form.violatorData, licenseNumber: e.target.value }); setViolatorLookup(null) }}
+                            onBlur={e => lookupViolator('establishment', e.target.value)}
                             className="w-full bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                             placeholder="LIC-XXXX" dir="ltr" />
                         </div>
                         <div>
                           <label className="text-xs text-slate-500 dark:text-gray-400 mb-1 block">السجل التجاري</label>
                           <input value={form.violatorData.commercialReg}
-                            onChange={e => set('violatorData', { ...form.violatorData, commercialReg: e.target.value })}
+                            onChange={e => { set('violatorData', { ...form.violatorData, commercialReg: e.target.value }); setViolatorLookup(null) }}
+                            onBlur={e => lookupViolator('establishment', e.target.value)}
                             className="w-full bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                             placeholder="CR-XXXX" dir="ltr" />
                         </div>
@@ -711,7 +865,8 @@ export default function ReportNew() {
                         <div>
                           <label className="text-xs text-slate-500 dark:text-gray-400 mb-1 block">أو أدخل اسم المقاول يدوياً</label>
                           <input value={form.violatorData.contractorName}
-                            onChange={e => set('violatorData', { ...form.violatorData, contractorName: e.target.value })}
+                            onChange={e => { set('violatorData', { ...form.violatorData, contractorName: e.target.value }); setViolatorLookup(null) }}
+                            onBlur={e => lookupViolator('contractor', e.target.value)}
                             className="w-full bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                             placeholder="اسم شركة أو مؤسسة المقاولات" />
                         </div>
@@ -788,7 +943,8 @@ export default function ReportNew() {
                         <div>
                           <label className="text-xs text-slate-500 dark:text-gray-400 mb-1 block">رقم الهوية</label>
                           <input value={form.violatorData.beneficiaryId}
-                            onChange={e => set('violatorData', { ...form.violatorData, beneficiaryId: e.target.value })}
+                            onChange={e => { set('violatorData', { ...form.violatorData, beneficiaryId: e.target.value }); setViolatorLookup(null) }}
+                            onBlur={e => lookupViolator('beneficiary', e.target.value)}
                             className="w-full bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                             placeholder="1XXXXXXXXX" dir="ltr" />
                         </div>

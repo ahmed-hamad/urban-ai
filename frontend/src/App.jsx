@@ -22,6 +22,8 @@ import GISIntakeQueue from './pages/GISIntakeQueue'
 import ObservationLayers from './pages/ObservationLayers'
 import DuplicateAnalysis from './pages/DuplicateAnalysis'
 import AgentAI from './pages/AgentAI'
+import VPI     from './pages/VPI'
+import EOI     from './pages/EOI'
 
 // Route-level RBAC guard — redirects to dashboard if role not authorized
 function RequireRole({ roles, children }) {
@@ -94,6 +96,16 @@ export default function App() {
                 </RequireRole>
               } />
               <Route path="/agent" element={<AgentAI />} />
+              <Route path="/vpi" element={
+                <RequireRole roles={['admin', 'executive', 'auditor', 'manager']}>
+                  <VPI />
+                </RequireRole>
+              } />
+              <Route path="/eoi" element={
+                <RequireRole roles={['admin', 'executive', 'auditor', 'manager']}>
+                  <EOI />
+                </RequireRole>
+              } />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
