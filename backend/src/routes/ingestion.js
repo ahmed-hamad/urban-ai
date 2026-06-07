@@ -17,6 +17,9 @@ import {
 import { suggestGroups, describeGroup }        from '../services/ingestion/candidateGrouper.js'
 import { enrichReportSpatially } from '../services/spatialGovernance.js'
 import { analyzeImage, PIPELINE_STATUS } from '../services/ingestion/detectionPipeline.js'
+import {
+  listMappings, createMapping, updateMapping, invalidateMappingCache,
+} from '../services/ingestion/elementMappingService.js'
 
 const router = Router()
 
@@ -476,6 +479,13 @@ router.patch('/candidates/:id/tag', requirePermission('create_report'), async (r
 // PATCH /api/ingestion/candidates/:id/confirm
 // Human reviews and confirms a candidate → creates a draft report + report_media entry.
 // This is the ONLY path from candidate to report for media-based ingestion.
+//
+// Element resolution priority:
+//   1. Reviewer's explicit elementType override (bodyElementType)
+//   2. Candidate's mapped_urban_element_id (from element_detection_mapping)
+//   3. Candidate's suggested_element_type (raw AI label — fallback only)
+//
+// After commit: writes an ai_training_sample for future YOLO training dataset.
 router.patch('/candidates/:id/confirm', requirePermission('create_report'), async (req, res) => {
   const { elementType, elementLabel, description, notes, entityId: bodyEntityId } = req.body
   const client = await getClient()
@@ -515,6 +525,15 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
       return res.status(403).json({ error: 'Forbidden', code: 'ENTITY_MISMATCH' })
     }
 
+    // Resolve final element using the three-layer priority:
+    //   reviewer override → mapped UrbanAI element → raw AI suggestion
+    const finalElementType = elementType
+      ?? candidate.mapped_urban_element_id
+      ?? candidate.suggested_element_type
+    const finalElementLabel = elementLabel
+      ?? candidate.mapped_urban_element_label
+      ?? candidate.suggested_element_label
+
     const candidateLat = candidate.gps_lat != null ? String(candidate.gps_lat) : null
     const candidateLng = candidate.gps_lng != null ? String(candidate.gps_lng) : null
 
@@ -541,8 +560,7 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
        RETURNING *`,
       [
         resolvedEntityId, candidate.id,
-        elementType  ?? candidate.suggested_element_type,
-        elementLabel ?? candidate.suggested_element_label,
+        finalElementType, finalElementLabel,
         description, candidateLat, candidateLng, req.user.id, reportNumber,
       ],
     )
@@ -568,13 +586,57 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
       [req.user.id, notes, report.id, resolvedEntityId, candidate.id],
     )
 
+    // Determine whether the reviewer changed the AI mapping
+    const reviewerModified = !!elementType &&
+      elementType !== (candidate.mapped_urban_element_id ?? candidate.suggested_element_type)
+    const reviewerDecision = reviewerModified ? 'modified' : 'confirmed'
+
     await audit('detection_candidate', candidate.id, 'candidate_confirmed', req.user,
-      { reportId: report.id, elementType, entityId: resolvedEntityId }, client)
+      {
+        reportId: report.id,
+        finalElementType,
+        reviewerDecision,
+        aiMappedElement: candidate.mapped_urban_element_id,
+        entityId: resolvedEntityId,
+      }, client)
     await audit('report', report.id, 'created', req.user,
       { source: 'media_upload', candidateId: candidate.id }, client)
 
     await client.query('COMMIT')
-    await enrichReportSpatially(report.id, report.location, resolvedEntityId)
+
+    // GIS enrichment (non-blocking — runs after commit so enrichment errors never abort the report)
+    const enrichment = await enrichReportSpatially(report.id, report.location, resolvedEntityId)
+
+    // Training dataset: write ground-truth sample after enrichment so spatial context is available
+    query(
+      `INSERT INTO ai_training_samples
+         (detection_candidate_id, image_path,
+          mapped_urban_element_id, mapped_urban_element_label, bounding_box,
+          reviewer_decision, reviewed_by, reviewed_at,
+          ai_provider, ai_model, ai_confidence, ai_predicted_label,
+          gps_lat, gps_lng,
+          municipality, district, priority_zone)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+      [
+        candidate.id,
+        candidate.mi_file_path,
+        finalElementType,
+        finalElementLabel,
+        candidate.detection_bbox ? JSON.stringify(candidate.detection_bbox) : null,
+        reviewerDecision,
+        req.user.id,
+        candidate.ai_provider ?? 'claude_vision',
+        candidate.detection_model,
+        candidate.detection_confidence,
+        candidate.suggested_element_type,
+        candidate.gps_lat,
+        candidate.gps_lng,
+        enrichment?.municipality ?? null,
+        enrichment?.district     ?? null,
+        enrichment?.priority     ?? null,
+      ],
+    ).catch(err => console.error('[ingestion] training sample insert error:', err.message))
+
     res.status(201).json({ success: true, reportId: report.id, report })
   } catch (err) {
     await client.query('ROLLBACK')
@@ -589,20 +651,58 @@ router.patch('/candidates/:id/confirm', requirePermission('create_report'), asyn
 router.patch('/candidates/:id/reject', requirePermission('create_report'), async (req, res) => {
   const { reason } = req.body
 
-  const { rows } = await query(
-    `UPDATE detection_candidates SET
-       review_status = 'rejected', reviewed_by = $1, reviewed_at = NOW(),
-       review_notes = $2, updated_at = NOW()
-     WHERE id = $3 AND review_status = 'pending_review'
-     RETURNING id, entity_id`,
-    [req.user.id, reason, req.params.id],
-  )
-  if (!rows.length) {
-    return res.status(404).json({ error: 'Candidate not found or already reviewed' })
-  }
+  try {
+    const { rows } = await query(
+      `UPDATE detection_candidates SET
+         review_status = 'rejected', reviewed_by = $1, reviewed_at = NOW(),
+         review_notes = $2, updated_at = NOW()
+       WHERE id = $3 AND review_status = 'pending_review'
+       RETURNING id, entity_id, ai_provider, detection_model, detection_confidence,
+                 suggested_element_type, gps_lat, gps_lng, detection_bbox,
+                 media_ingestion_id`,
+      [req.user.id, reason, req.params.id],
+    )
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Candidate not found or already reviewed' })
+    }
 
-  await audit('detection_candidate', req.params.id, 'candidate_rejected', req.user, { reason })
-  res.json({ success: true })
+    const dc = rows[0]
+    await audit('detection_candidate', req.params.id, 'candidate_rejected', req.user, { reason })
+
+    // Training dataset: rejected candidates are negative samples — equally valuable for training
+    if (dc.media_ingestion_id) {
+      const { rows: [mi] } = await query(
+        `SELECT file_path FROM media_ingestions WHERE id = $1`, [dc.media_ingestion_id]
+      )
+      if (mi?.file_path) {
+        query(
+          `INSERT INTO ai_training_samples
+             (detection_candidate_id, image_path,
+              mapped_urban_element_id, bounding_box,
+              reviewer_decision, reviewed_by, reviewed_at,
+              ai_provider, ai_model, ai_confidence, ai_predicted_label,
+              gps_lat, gps_lng)
+           VALUES ($1,$2,$3,$4,'rejected',$5,NOW(),$6,$7,$8,$9,$10,$11)`,
+          [
+            dc.id, mi.file_path,
+            dc.suggested_element_type,
+            dc.detection_bbox ? JSON.stringify(dc.detection_bbox) : null,
+            req.user.id,
+            dc.ai_provider ?? 'claude_vision',
+            dc.detection_model,
+            dc.detection_confidence,
+            dc.suggested_element_type,
+            dc.gps_lat, dc.gps_lng,
+          ],
+        ).catch(err => console.error('[ingestion] training sample (reject) insert error:', err.message))
+      }
+    }
+
+    res.json({ success: true })
+  } catch (err) {
+    console.error('[ingestion] candidate reject error:', err)
+    res.status(500).json({ error: 'Failed to reject candidate' })
+  }
 })
 
 // POST /api/ingestion/candidates/suggest-groups
@@ -1654,6 +1754,128 @@ router.delete('/spatial-layers', requirePermission('view_reports'), async (req, 
 
   await audit('spatial_layer', randomUUID(), 'bulk_deleted', req.user, { count: layerIds.length, ids: layerIds })
   res.json({ success: true, deleted: layerIds.length })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ELEMENT DETECTION MAPPING
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/ingestion/mapping
+// List all active element mappings (optionally filter by ai_provider).
+// Available to all authenticated users — used by the review UI to show mapped elements.
+router.get('/mapping', requirePermission('view_reports'), async (req, res) => {
+  const { ai_provider, include_inactive } = req.query
+  const rows = await listMappings({
+    aiProvider: ai_provider || undefined,
+    includeInactive: include_inactive === 'true',
+  })
+  res.json({ mappings: rows, total: rows.length })
+})
+
+// GET /api/ingestion/mapping/:id
+router.get('/mapping/:id', requirePermission('view_reports'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT * FROM element_detection_mapping WHERE id = $1`,
+    [req.params.id],
+  )
+  if (!rows.length) return res.status(404).json({ error: 'Mapping not found' })
+  res.json({ mapping: rows[0] })
+})
+
+// POST /api/ingestion/mapping
+// Admin only: create a new AI label → UrbanAI element mapping.
+router.post('/mapping', requirePermission('create_report'), async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden', code: 'ADMIN_ONLY' })
+  }
+
+  const { aiLabel, aiProvider, urbanElementId, urbanElementLabel,
+          regulatoryElementId, confidenceThreshold, notes } = req.body
+
+  if (!aiLabel || !aiProvider || !urbanElementId || !urbanElementLabel) {
+    return res.status(400).json({
+      error: 'aiLabel, aiProvider, urbanElementId, urbanElementLabel are required',
+    })
+  }
+
+  try {
+    const row = await createMapping({
+      aiLabel, aiProvider, urbanElementId, urbanElementLabel,
+      regulatoryElementId, confidenceThreshold, notes,
+    })
+    await audit('element_mapping', row.id, 'mapping_created', req.user, { aiLabel, aiProvider, urbanElementId })
+    res.status(201).json({ success: true, mapping: row })
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: `Mapping for "${aiLabel}" (${aiProvider}) already exists` })
+    }
+    throw err
+  }
+})
+
+// PATCH /api/ingestion/mapping/:id
+// Admin only: update an existing mapping (partial update).
+router.patch('/mapping/:id', requirePermission('create_report'), async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden', code: 'ADMIN_ONLY' })
+  }
+
+  const { urban_element_id, urban_element_label, regulatory_element_id,
+          confidence_threshold, active, notes } = req.body
+
+  const row = await updateMapping(req.params.id, {
+    urban_element_id, urban_element_label, regulatory_element_id,
+    confidence_threshold, active, notes,
+  })
+  if (!row) return res.status(404).json({ error: 'Mapping not found' })
+
+  await audit('element_mapping', req.params.id, 'mapping_updated', req.user, { fields: Object.keys(req.body) })
+  res.json({ success: true, mapping: row })
+})
+
+// DELETE /api/ingestion/mapping/:id
+// Admin only: soft-delete (sets active = false) to preserve audit trail.
+router.delete('/mapping/:id', requirePermission('create_report'), async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden', code: 'ADMIN_ONLY' })
+  }
+
+  const row = await updateMapping(req.params.id, { active: false })
+  if (!row) return res.status(404).json({ error: 'Mapping not found' })
+
+  invalidateMappingCache(row.ai_provider)
+  await audit('element_mapping', req.params.id, 'mapping_deactivated', req.user, {})
+  res.json({ success: true })
+})
+
+// ─── Training Dataset Export (read-only) ─────────────────────────────────────
+
+// GET /api/ingestion/training-samples
+// Lists training samples for dataset export. Admin only.
+router.get('/training-samples', requirePermission('view_reports'), async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden', code: 'ADMIN_ONLY' })
+  }
+
+  const { decision, element, exported, page = 1, limit = 100 } = req.query
+  const offset = (page - 1) * limit
+
+  const params = []
+  let sql = `SELECT ts.*, u.full_name AS reviewer_name
+             FROM ai_training_samples ts
+             LEFT JOIN users u ON u.id = ts.reviewed_by
+             WHERE 1=1`
+
+  if (decision)              { params.push(decision);  sql += ` AND ts.reviewer_decision = $${params.length}` }
+  if (element)               { params.push(element);   sql += ` AND ts.mapped_urban_element_id = $${params.length}` }
+  if (exported === 'false')  { sql += ` AND ts.exported_at IS NULL` }
+  if (exported === 'true')   { sql += ` AND ts.exported_at IS NOT NULL` }
+
+  params.push(Number(limit), Number(offset))
+  sql += ` ORDER BY ts.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`
+
+  const { rows } = await query(sql, params)
+  res.json({ samples: rows, total: rows.length, page: Number(page), limit: Number(limit) })
 })
 
 export default router

@@ -19,7 +19,6 @@ import {
   getOperationalSummary,
   getStatusBreakdown,
   getVisitStatusAnalysis,
-  getVisitDrill,
   getInProgressAnalysis,
   getRepeatedAnalysis,
   getClosureQuality,
@@ -151,41 +150,6 @@ router.get('/analytics/visit-status', async (req, res) => {
   const m = month || months[0]
   if (!m) return res.json({ month: null, data: null })
   res.json({ month: m, data: await getVisitStatusAnalysis({ month: m, municipalityName: muni }) })
-})
-
-router.get('/analytics/visit-drill', async (req, res) => {
-  const { month, visit_status, municipality } = req.query
-  const muni = muniScope(req, municipality)
-  const months = await getAvailableEOIMonths()
-  const m = month || months[0]
-  if (!m) return res.json({ data: [] })
-  try {
-    res.json({ data: await getVisitDrill({ month: m, visitStatus: visit_status, municipalityName: muni }) })
-  } catch (err) { res.status(500).json({ error: err.message }) }
-})
-
-router.get('/analytics/visit-export', async (req, res) => {
-  const { month, visit_status, municipality } = req.query
-  const muni = muniScope(req, municipality)
-  const months = await getAvailableEOIMonths()
-  const m = month || months[0]
-  if (!m) return res.status(400).json({ error: 'لا توجد بيانات' })
-  try {
-    const rows = await getVisitDrill({ month: m, visitStatus: visit_status, municipalityName: muni })
-    const XLSX = (await import('xlsx')).default
-    const wsData = [
-      ['اسم العنصر', 'البلدية', 'خط العرض', 'خط الطول', 'تاريخ الرصد', 'تاريخ الإغلاق', 'رقم البلاغ', 'حالة الزيارة', 'حالة الإغلاق'],
-      ...rows.map(r => [r.element_name, r.municipality_name, r.lat, r.lng, r.observation_date, r.closure_date, r.report_number, r.visit_status, r.closure_status]),
-    ]
-    const ws = XLSX.utils.aoa_to_sheet(wsData)
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'الزيارات')
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
-    const fname = `visit_${m}${visit_status ? '_' + visit_status.replace(/\s+/g,'_') : ''}.xlsx`
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}"`)
-    res.send(buf)
-  } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
 router.get('/analytics/in-progress', async (req, res) => {

@@ -302,8 +302,23 @@ Before implementing any feature:
 5. Explain GIS impact
 6. Explain spatial governance impact
 7. Explain performance impact
-8. Avoid breaking existing functionality
-9. Avoid architectural duplication
+8. Explain Mobile Readiness impact
+9. Explain AI impact
+10. Avoid breaking existing functionality
+11. Avoid architectural duplication
+
+Before implementing any **major** feature, provide a full 8-point impact analysis:
+
+* Architecture Impact
+* API Impact
+* RBAC Impact
+* Workflow Impact
+* GIS Impact
+* Mobile Readiness Impact
+* AI Impact
+* Security Impact
+
+Verify that future mobile applications can consume the functionality without backend redesign.
 
 Never rebuild the project from scratch unless explicitly requested.
 
@@ -451,6 +466,276 @@ Support:
 
 ---
 
+# Mobile Readiness Rules
 
+UrbanAI is a Platform, not a Web Application.
+
+The React frontend is only one client.
+
+Future clients may include:
+
+* Android App
+* iPhone App
+* Tablet App
+* Rugged Field Devices
+* External APIs
+* Government Integrations
+
+All new functionality must be exposed through governed APIs.
+
+Business logic must never be implemented inside frontend applications.
+
+Frontend applications (Web and Mobile) must consume the same APIs.
+
+The system architecture must remain:
+
+Client
+→ API Layer
+→ Application Services
+→ Domain Services
+→ Database
+
+to allow future React Native mobile applications without backend redesign.
+
+All GIS, Workflow, Analytics and AI functionality must be mobile-ready through APIs.
+
+Before implementing any new feature, verify:
+
+Can this functionality be consumed by Web, Mobile, GIS, and AI Copilot through APIs?
+
+If not — refactor first.
+
+---
+
+# Mobile Readiness — Required API Domain Coverage
+
+Every capability must be exposed through a governed API.
+
+This includes:
+
+* Authentication (JWT + Refresh Tokens, platform-wide, never web-only)
+* Users, Roles, Permissions
+* Reports, Draft Reports, Imported Reports
+* GIS Layers, Intersections, Municipal Boundaries, Priority Zones, Contracts
+* Workflow Actions (Create / Assign / Start Visit / Finish Visit / Submit Evidence / Request Review / Close)
+* Attachments, Media Uploads
+* Analytics, VPI, Forecasting, Operational Intelligence
+* Notifications (backend-originated, never frontend logic)
+* AI Copilot
+
+No capability may exist only inside React components.
+
+---
+
+# Media Governance
+
+Media services must support future field operations.
+
+Supported media types:
+
+* Images
+* Videos
+* Geotagged Media
+* Evidence Attachments
+* AI Processing Inputs
+
+Store separately from files:
+
+* Media Metadata
+* GPS Metadata
+* Capture Metadata
+
+All uploads must be API-based.
+
+Never tie media logic to frontend components.
+
+---
+
+# Notification Architecture
+
+Notifications are a backend domain.
+
+Future notification types:
+
+* Push Notifications
+* Workflow Notifications
+* Assignment Notifications
+* SLA Notifications
+* AI Alerts
+* GIS Alerts
+
+Notifications must originate from backend events only.
+
+Never from frontend logic.
+
+Design notification domain to support future push delivery without backend redesign.
+
+---
+
+# Offline Readiness (Architecture Only)
+
+Do NOT implement offline mode in the current phase.
+
+However — design all entities and APIs to support future synchronization.
+
+Prepare architecture for:
+
+* Local Storage
+* Synchronization
+* Conflict Resolution
+* Retry Queues
+
+No implementation required now.
+
+Architecture readiness only.
+
+---
+
+# Field Operations Future Vision
+
+The future mobile application will be a Field Operations Client — not a second copy of the UrbanAI web platform.
+
+Primary field responsibilities:
+
+* Receive Assignments
+* Navigate to Reports
+* Capture Images
+* Capture Videos
+* Record Visits
+* Upload Evidence
+* Update Status
+* Close Reports
+* Receive Notifications
+
+Advanced analytics and management capabilities remain in the Web Platform.
+
+Device support must include:
+
+* Android
+* iPhone
+* Tablets
+* Rugged Devices
+
+Do not introduce platform-specific assumptions in backend services.
+
+---
+
+# Current Phase Restrictions — DO NOT BUILD
+
+During the Platform Stabilization Phase, do NOT build:
+
+* React Native App
+* Mobile Screens
+* Offline Synchronization
+* Push Notification Infrastructure
+
+Current phase objective: architecture readiness only.
+
+---
+
+# Platform Success Criteria
+
+When UrbanAI reaches platform stability:
+
+A React Native mobile application must be buildable using existing APIs with minimal backend modifications.
+
+No major redesign should be required for:
+
+* Database
+* GIS Services
+* Workflow Services
+* Analytics Services
+* AI Services
+---
+
+# Multi-Client Architecture Rules
+
+UrbanAI is a platform serving multiple clients.
+
+Clients may include:
+
+* Web Platform
+* Future Mobile Applications
+* AI Copilot
+* GIS Services
+* External Government Integrations
+* Future Public APIs
+
+The React frontend is only one client.
+
+Business entities belong to the platform, not to individual clients.
+
+Domain models must remain shared across:
+
+* Web
+* Mobile
+* AI
+* GIS
+
+Avoid creating client-specific business entities.
+
+Platform architecture must always remain:
+
+Client
+→ API
+→ Services
+→ Database
+
+Never implement business logic exclusively for a single client.
+
+---
+
+# API Governance Rules
+
+All public APIs must support versioning.
+
+Examples:
+
+* /api/v1/reports
+* /api/v1/gis
+* /api/v1/analytics
+* /api/v1/assistant
+
+API changes must remain backward compatible whenever possible.
+
+Mobile clients must not break due to frontend-driven API changes.
+
+Business logic must be exposed through governed APIs.
+
+No functionality may exist only inside frontend components.
+
+---
+
+# AI Vision Architecture Rules
+
+Computer Vision services must remain isolated from UrbanAI core services.
+
+Architecture:
+
+Web / Mobile
+→ Backend APIs
+→ AI Vision Service
+→ Inference Pipeline
+
+The AI Vision Service may include:
+
+* YOLO
+* Object Detection
+* Segmentation Models
+* Future Fine-Tuned Models
+
+Never embed Computer Vision models inside:
+
+* React Frontend
+* Mobile Applications
+* Core Workflow Services
+
+AI Vision outputs are suggestions only.
+
+Human validation remains mandatory.
+
+AI detections must never create official reports automatically.
+
+---
 
 All future engineering decisions must preserve this direction.

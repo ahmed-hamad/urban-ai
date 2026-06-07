@@ -24,10 +24,13 @@ router.get('/', requirePermission('view_reports'), async (req, res) => {
   const params = []
   let sql = `
     SELECT r.*,
+           e.name  AS entity_name,
+           e.type  AS entity_type,
            u1.full_name AS created_by_name,
            u2.full_name AS assigned_to_name,
            COUNT(*) OVER() AS total_count
     FROM reports r
+    LEFT JOIN entities e ON e.id = r.entity_id
     LEFT JOIN users u1 ON u1.id = r.created_by
     LEFT JOIN users u2 ON u2.id = r.assigned_to
     WHERE 1=1
@@ -139,6 +142,8 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
 
   const { rows } = await query(
     `SELECT r.*,
+            e.name  AS entity_name,
+            e.type  AS entity_type,
             u1.full_name  AS created_by_name,
             u2.full_name  AS assigned_to_name,
             ST_AsGeoJSON(r.location)::json AS location_geojson,
@@ -173,6 +178,7 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
             ), '[]'::json) AS media_attachments
 
      FROM reports r
+     LEFT JOIN entities e ON e.id = r.entity_id
      LEFT JOIN users u1        ON u1.id  = r.created_by
      LEFT JOIN users u2        ON u2.id  = r.assigned_to
      LEFT JOIN import_features imf ON imf.id = r.import_feature_id
@@ -200,14 +206,10 @@ router.get('/:id', requirePermission('view_reports'), async (req, res) => {
 // ingestion_source is set to 'media_upload'.
 router.post('/', requirePermission('create_report'), async (req, res) => {
   const {
-    coords, element, description, entity_id, district, location_name, monitoring_source,
-    priority, violations_data, estimated_fine, violator_name, violator_id, violator_type,
-    candidateId,
+    coords, element, element_label, description, entity_id, district, location_name,
+    monitoring_source, priority, violations_data, estimated_fine, violator_name,
+    violator_id, violator_type, candidateId,
   } = req.body
-
-  // Derive notice-period fields from violations_data (set by frontend based on regulation articles)
-  const hasNoticePeriod = !!(violations_data?.hasNoticePeriod)
-  const correctionDays  = violations_data?.correctionDays ? parseInt(violations_data.correctionDays) : null
 
   const entityId = entity_id || req.user.entityId
 
@@ -240,25 +242,23 @@ router.post('/', requirePermission('create_report'), async (req, res) => {
         district, location_name, gps_lat, gps_lng, created_by, report_number,
         monitoring_source, priority, violations_data,
         estimated_fine, violator_name, violator_id, violator_type,
-        has_notice_period, correction_days,
         location)
-     VALUES ($1,$2,$3::uuid,$4,$4,'draft',$5,$6,$7,
-             $8::double precision,$9::double precision,$10,$11,$12,$13,
-             $14::jsonb,$15::numeric,$16,$17,$18,
-             $19,$20::integer,
+     VALUES ($1,$2,$3::uuid,$4,$5,'draft',$6,$7,$8,
+             $9::double precision,$10::double precision,$11,$12,$13,$14,
+             $15::jsonb,$16::numeric,$17,$18,$19,
        CASE
-         WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
-         THEN ST_SetSRID(ST_MakePoint($9::double precision,$8::double precision),4326)
+         WHEN $9::double precision IS NOT NULL AND $10::double precision IS NOT NULL
+         THEN ST_SetSRID(ST_MakePoint($10::double precision,$9::double precision),4326)
          ELSE NULL
        END)
      RETURNING *`,
     [
       entityId, ingestionSource, candidateId || null,
-      element, description, district, location_name,
+      element, element_label || element || null,
+      description, district, location_name,
       latStr, lngStr, req.user.id, reportNumber,
       monitoring_source || null, priority || null,
       violationsJson, fineVal, violator_name || null, violator_id || null, violator_type || null,
-      hasNoticePeriod, correctionDays,
     ],
   )
 

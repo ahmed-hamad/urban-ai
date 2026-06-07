@@ -294,32 +294,19 @@ async function _batchInsert(jobId, rows) {
 // ─── Live VPI recalculation ───────────────────────────────────────────────────
 
 export async function _recalcLiveVPI(month) {
-  // Total estimated units for this month (all observations)
+  // Total estimated units for this month
   const { rows: [agg] } = await pool.query(`
-    SELECT COUNT(*)::int          AS total_reports,
-           SUM(estimated_units)   AS total_units,
+    SELECT COUNT(*)::int       AS total_reports,
+           SUM(estimated_units) AS total_units,
            COUNT(DISTINCT observation_date)::int AS data_days,
-           MIN(observation_date)  AS first_date,
-           MAX(observation_date)  AS last_date
+           MIN(observation_date) AS first_date,
+           MAX(observation_date) AS last_date
     FROM eoi_observations WHERE observation_month=$1
   `, [month])
 
   const totalReports = agg.total_reports || 0
   const totalUnits   = parseFloat(agg.total_units) || 0
   const dataDays     = agg.data_days || 0
-
-  // Adjusted: exclude observations flagged as false reports.
-  // NULL-safe: NOT ILIKE returns NULL (not FALSE) for NULL inputs, so use IS NULL guard.
-  const { rows: [adjAgg] } = await pool.query(`
-    SELECT COUNT(*)::int          AS adj_reports,
-           SUM(estimated_units)   AS adj_units
-    FROM eoi_observations
-    WHERE observation_month=$1
-      AND (visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%')
-  `, [month])
-
-  const adjReports = adjAgg.adj_reports || 0
-  const adjUnits   = parseFloat(adjAgg.adj_units) || 0
 
   // Get covered area from official VPI coverage (same month)
   const { rows: covRows } = await pool.query(`
@@ -328,11 +315,10 @@ export async function _recalcLiveVPI(month) {
   `, [month])
   const covered = covRows[0]?.covered ? parseFloat(covRows[0].covered) : null
 
-  // Calculate live VPI (full) and adjusted VPI
+  // Calculate live VPI
   const liveVPI = (covered && covered > 0) ? totalUnits / covered : null
-  const adjVPI  = (covered && covered > 0) ? adjUnits   / covered : null
 
-  // Forecast: daily rate * days in month (using full dataset)
+  // Forecast: daily rate * days in month
   const [y, m] = month.split('-').map(Number)
   const daysInMonth = new Date(y, m, 0).getDate()
   const dailyRate   = dataDays > 0 ? totalUnits / dataDays : 0
@@ -340,16 +326,15 @@ export async function _recalcLiveVPI(month) {
   const forecastVPI   = (forecastUnits != null && covered && covered > 0) ? forecastUnits / covered : null
 
   // Confidence: based on % of month with data
-  const coverage   = dataDays / daysInMonth
+  const coverage = dataDays / daysInMonth
   const confidence = coverage < 0.30 ? 'low' : coverage < 0.60 ? 'medium' : 'high'
 
   await pool.query(`
     INSERT INTO eoi_live_vpi
       (observation_month, total_reports, total_estimated_units, covered_area_km2,
        estimated_vpi, data_days, days_in_month, forecast_units_eom, forecast_vpi_eom,
-       confidence_score, adj_total_reports, adj_total_units, adj_estimated_vpi,
-       last_updated)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+       confidence_score, last_updated)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
     ON CONFLICT (observation_month) DO UPDATE SET
       total_reports         = EXCLUDED.total_reports,
       total_estimated_units = EXCLUDED.total_estimated_units,
@@ -360,13 +345,8 @@ export async function _recalcLiveVPI(month) {
       forecast_units_eom    = EXCLUDED.forecast_units_eom,
       forecast_vpi_eom      = EXCLUDED.forecast_vpi_eom,
       confidence_score      = EXCLUDED.confidence_score,
-      adj_total_reports     = EXCLUDED.adj_total_reports,
-      adj_total_units       = EXCLUDED.adj_total_units,
-      adj_estimated_vpi     = EXCLUDED.adj_estimated_vpi,
       last_updated          = NOW()
-  `, [month, totalReports, totalUnits, covered, liveVPI,
-      dataDays, daysInMonth, forecastUnits, forecastVPI, confidence,
-      adjReports, adjUnits, adjVPI])
+  `, [month, totalReports, totalUnits, covered, liveVPI, dataDays, daysInMonth, forecastUnits, forecastVPI, confidence])
 }
 
 // ─── Mapping Templates ────────────────────────────────────────────────────────

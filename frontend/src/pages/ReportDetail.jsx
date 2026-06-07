@@ -772,7 +772,7 @@ export default function ReportDetail() {
           </div>
           <StatusBadge status={currentStatus} />
           <span className="text-xs font-mono text-slate-400 dark:text-gray-500 bg-slate-100 dark:bg-gray-800 px-2 py-1 rounded-lg">
-            {report.id}
+            {report.reportNumber || report.id}
           </span>
         </div>
 

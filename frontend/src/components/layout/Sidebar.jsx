@@ -4,7 +4,7 @@ import { useAuth } from '@/context/AuthContext'
 import { cn } from '@/lib/utils'
 import {
   LayoutDashboard, ClipboardList, MapPin, TrendingUp,
-  Users, Shield, ChevronRight, ChevronLeft, FileText, ScanSearch, LogOut, Circle, Network,
+  Users, Shield, ChevronRight, ChevronLeft, FileText, LogOut, Circle, Network,
   Inbox, Layers, ListChecks, Eye, GitMerge, Bot, Activity,
 } from 'lucide-react'
 import { useData } from '@/context/DataContext'
@@ -17,7 +17,7 @@ const NAV_ITEMS = [
   { path: '/agent',      label: 'المساعد الذكي',    Icon: Bot,             desc: 'تحليل مكاني · Claude + PostGIS', allowedRoles: null },
   { path: '/reports',    label: 'سلة البلاغات',     Icon: ClipboardList,   desc: 'إدارة البلاغات',               badgeKey: 'openReports', allowedRoles: null },
   { path: '/map',        label: 'الخريطة الذكية',   Icon: MapPin,          desc: 'GIS · خرائط حرارية',           allowedRoles: null },
-  { path: '/analyze',    label: 'تحليل المرئيات',   Icon: ScanSearch,      desc: 'رصد بالذكاء الاصطناعي',       allowedRoles: null },
+  { path: '/ingestion',  label: 'رفع الصور والكشف', Icon: Inbox,           desc: 'رفع → AI → مراجعة → بلاغ',    allowedRoles: ['admin', 'executive', 'manager', 'monitor'] },
   { path: '/violations', label: 'اللائحة والغرامات', Icon: FileText,        desc: 'لائحة التشوه البصري',          allowedRoles: null },
   { path: '/financial',  label: 'التوقع المالي',    Icon: TrendingUp,      desc: 'تحليل الغرامات',               allowedRoles: ['admin', 'executive', 'auditor', 'manager'] },
   { path: '/entities',   label: 'الهيكل التنظيمي',  Icon: Network,         desc: 'إدارة الجهات والوحدات',        allowedRoles: ['admin', 'executive', 'auditor', 'manager'] },

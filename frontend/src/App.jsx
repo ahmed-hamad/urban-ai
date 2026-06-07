@@ -13,7 +13,6 @@ import Financial from './pages/Financial'
 import Users from './pages/Users'
 import AuditLog from './pages/AuditLog'
 import ViolationsManager from './pages/ViolationsManager'
-import MediaAnalysis from './pages/MediaAnalysis'
 import ReportNew from './pages/ReportNew'
 import Entities from './pages/Entities'
 import IngestionQueue from './pages/IngestionQueue'
@@ -48,7 +47,6 @@ export default function App() {
               <Route path="/reports/new" element={<ReportNew />} />
               <Route path="/reports/:id" element={<ReportDetail />} />
               <Route path="/map" element={<GISMap />} />
-              <Route path="/analyze" element={<MediaAnalysis />} />
               <Route path="/violations" element={<ViolationsManager />} />
               <Route path="/financial" element={
                 <RequireRole roles={['admin', 'executive', 'auditor', 'manager']}>

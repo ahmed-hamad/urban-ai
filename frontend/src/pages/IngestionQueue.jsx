@@ -6,6 +6,7 @@ import { regulationData } from '@/data/mockData'
 import {
   Inbox, Image, Video, Upload, MapPin, Clock, CheckCircle2, XCircle,
   Layers, RefreshCw, AlertTriangle, ScanSearch, Cpu, X, Plus, Tag, Search,
+  Crosshair, ArrowRightLeft, ShieldCheck, Info,
 } from 'lucide-react'
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:3002'
@@ -221,82 +222,255 @@ function ElementTypePicker({ value, onChange }) {
   )
 }
 
-// ─── Confirm dialog ───────────────────────────────────────────────────────────
+// ─── Bounding Box Image Overlay ───────────────────────────────────────────────
+
+function BoundingBoxImage({ imageUrl, bbox, label, confidence }) {
+  const hasBbox = Array.isArray(bbox) && bbox.length === 4
+
+  return (
+    <div className="relative rounded-xl overflow-hidden bg-slate-900">
+      <img src={imageUrl} alt="" className="w-full block max-h-72 object-contain" />
+      {hasBbox && (
+        <div
+          className="absolute border-2 border-amber-400 pointer-events-none"
+          style={{
+            left:   `${bbox[0]}%`,
+            top:    `${bbox[1]}%`,
+            width:  `${bbox[2]}%`,
+            height: `${bbox[3]}%`,
+          }}
+        >
+          <span className="absolute top-0 left-0 -translate-y-full bg-amber-400 text-black text-xs font-bold px-1.5 py-0.5 rounded-t-sm whitespace-nowrap leading-tight">
+            {label ?? ''}
+            {confidence != null ? ` · ${(confidence * 100).toFixed(0)}%` : ''}
+          </span>
+        </div>
+      )}
+      {!hasBbox && (
+        <div className="absolute bottom-2 left-2 bg-black/50 text-white text-xs px-2 py-1 rounded-lg">
+          لا يوجد Bounding Box
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── AI Detection Info Card ───────────────────────────────────────────────────
+
+function DetectionInfoCard({ candidate }) {
+  const conf = candidate.detection_confidence
+  const confPct = conf != null ? Math.round(conf * 100) : null
+  const confColor = confPct == null ? 'text-slate-400' :
+    confPct >= 80 ? 'text-emerald-600 dark:text-emerald-400' :
+    confPct >= 60 ? 'text-amber-600 dark:text-amber-400' :
+                    'text-red-600 dark:text-red-400'
+
+  return (
+    <div className="rounded-xl border border-indigo-100 dark:border-indigo-500/20 bg-indigo-50 dark:bg-indigo-900/20 p-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <Cpu size={13} className="text-indigo-500 dark:text-indigo-400 flex-shrink-0" />
+        <span className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">اكتشاف الذكاء الاصطناعي</span>
+        <span className="text-xs text-indigo-500 dark:text-indigo-500 mr-auto">
+          {candidate.detection_model ?? candidate.ai_provider ?? 'AI'}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        <div>
+          <p className="text-xs text-slate-500 dark:text-gray-400">التسمية المكتشفة</p>
+          <p className="text-xs font-semibold text-slate-800 dark:text-white mt-0.5">
+            {candidate.suggested_element_label ?? candidate.suggested_element_type ?? '—'}
+          </p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-500 dark:text-gray-400">معدل الثقة</p>
+          <p className={`text-sm font-bold mt-0.5 ${confColor}`}>
+            {confPct != null ? `${confPct}%` : '—'}
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Mapped Element Card ──────────────────────────────────────────────────────
+
+function MappedElementCard({ candidate, overrideElementType, onChangeOverride }) {
+  const [showPicker, setShowPicker] = useState(false)
+
+  const mappedLabel = candidate.mapped_urban_element_label ?? candidate.suggested_element_label
+  const mappedId    = candidate.mapped_urban_element_id    ?? candidate.suggested_element_type
+  const regId       = candidate.mapped_regulatory_element_id
+
+  const overrideLabel = overrideElementType
+    ? regulationData.find(r => r.id === overrideElementType)?.name
+    : null
+
+  const displayLabel = overrideLabel ?? mappedLabel ?? '—'
+  const displayId    = overrideElementType ?? mappedId ?? '—'
+  const isOverridden = !!overrideElementType && overrideElementType !== mappedId
+
+  return (
+    <div className="rounded-xl border border-emerald-100 dark:border-emerald-500/20 bg-emerald-50 dark:bg-emerald-900/20 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ArrowRightLeft size={13} className="text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
+          <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">العنصر المُعيَّن</span>
+          {isOverridden && (
+            <span className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded-full">
+              تعديل يدوي
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowPicker(v => !v)}
+          className="text-xs text-emerald-600 dark:text-emerald-400 hover:underline font-medium"
+        >
+          {showPicker ? 'إخفاء' : 'تغيير'}
+        </button>
+      </div>
+
+      <div>
+        <p className="text-sm font-bold text-slate-800 dark:text-white">{displayLabel}</p>
+        <p className="text-xs text-slate-400 dark:text-gray-500 mt-0.5">{displayId}</p>
+        {regId && (
+          <div className="flex items-center gap-1.5 mt-1.5">
+            <ShieldCheck size={11} className="text-slate-400 dark:text-gray-500" />
+            <p className="text-xs text-slate-500 dark:text-gray-400">عنصر لائحي: <span className="font-medium">{regId}</span></p>
+          </div>
+        )}
+      </div>
+
+      {showPicker && (
+        <div className="pt-1 border-t border-emerald-200 dark:border-emerald-500/20">
+          <p className="text-xs text-slate-500 dark:text-gray-400 mb-1.5">اختر عنصراً مختلفاً:</p>
+          <ElementTypePicker
+            value={overrideElementType ?? mappedId ?? ''}
+            onChange={v => { onChangeOverride(v); setShowPicker(false) }}
+          />
+          {overrideElementType && (
+            <button type="button" onClick={() => onChangeOverride(null)}
+              className="mt-1.5 text-xs text-slate-400 hover:text-red-500 transition-colors">
+              إلغاء التعديل — إعادة الاقتراح الأصلي
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Confirm dialog — Review preview then launch wizard ────────────────────────
+// Governance rule: no report is created here. The modal is a read-only review
+// of the AI detection. The reviewer may override the element, then the wizard
+// (ReportNew, 6 steps) is launched with candidateId so it handles the full
+// governed creation + candidate confirmation.
 
 function ConfirmModal({ candidate, onConfirm, onClose }) {
-  const { entities } = useData()
-  const { user }     = useAuth()
+  const defaultElementType = candidate.mapped_urban_element_id
+    ?? candidate.suggested_element_type
+    ?? ''
+  const [overrideElementType, setOverrideElementType] = useState(null)
 
-  const [elementType, setElementType] = useState(candidate.suggested_element_type ?? '')
-  const [entityId, setEntityId]       = useState(candidate.entity_id ?? user?.entityId ?? '')
-  const [description, setDescription] = useState('')
-  const [notes, setNotes]             = useState('')
-  const [busy, setBusy]               = useState(false)
-  const [err, setErr]                 = useState(null)
+  const finalElementType = overrideElementType ?? defaultElementType
 
-  const canSubmit = !!elementType && !!entityId
-
-  async function submit() {
-    if (!canSubmit) return
-    setBusy(true)
-    setErr(null)
-    try { await onConfirm({ elementType, description, notes, entityId }) }
-    catch (e) { setErr(e.message) }
-    finally { setBusy(false) }
-  }
-
-  const previewUrl = candidate.thumbnail_path
+  const imageUrl = candidate.thumbnail_path
     ? buildUploadUrl(candidate.thumbnail_path)
     : candidate.file_type === 'image' && candidate.file_path
       ? buildUploadUrl(candidate.file_path)
       : null
 
+  const hasGPS = candidate.gps_lat != null && candidate.gps_lng != null
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
-        <h3 className="text-base font-bold text-slate-800 dark:text-white">تأكيد المرشح → بلاغ مسودة</h3>
-        {previewUrl && (
-          <img src={previewUrl} alt="" className="w-full h-40 object-cover rounded-xl" />
-        )}
-        <div className="space-y-3">
-          <div>
-            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">نوع العنصر (من اللائحة)</label>
-            <ElementTypePicker value={elementType} onChange={setElementType} />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="sticky top-0 z-10 bg-white dark:bg-gray-900 border-b border-slate-100 dark:border-gray-800 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+          <div className="flex items-center gap-2">
+            <Crosshair size={16} className="text-amber-500" />
+            <h3 className="text-base font-bold text-slate-800 dark:text-white">مراجعة الاكتشاف — الانتقال لمعالج البلاغ</h3>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">الوصف</label>
-            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2}
-              className="w-full rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
-              الجهة المسؤولة
-              <span className="text-red-500 mr-1">*</span>
-            </label>
-            <select value={entityId} onChange={e => setEntityId(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">اختر الجهة المسؤولة…</option>
-              {entities.map(e => (
-                <option key={e.id} value={e.id}>{e.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">ملاحظات المراجع</label>
-            <input value={notes} onChange={e => setNotes(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
-          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors">
+            <X size={18} />
+          </button>
         </div>
-        {err && <p className="text-xs text-red-500">{err}</p>}
-        <div className="flex gap-3 pt-1">
-          <button onClick={submit} disabled={busy || !canSubmit}
-            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors disabled:opacity-50">
-            {busy ? 'جارٍ الإنشاء…' : 'تأكيد وإنشاء بلاغ مسودة'}
-          </button>
-          <button onClick={onClose} disabled={busy}
-            className="px-4 text-sm text-slate-500 hover:text-slate-800 dark:text-gray-400 dark:hover:text-white transition-colors">
-            إلغاء
-          </button>
+
+        <div className="p-6 space-y-5">
+          {/* ── Image with Bounding Box ── */}
+          {imageUrl
+            ? <BoundingBoxImage
+                imageUrl={imageUrl}
+                bbox={candidate.detection_bbox}
+                label={candidate.suggested_element_label ?? candidate.suggested_element_type}
+                confidence={candidate.detection_confidence}
+              />
+            : (
+              <div className="h-28 rounded-xl bg-slate-100 dark:bg-gray-800 flex items-center justify-center gap-2 text-slate-400">
+                {candidate.file_type === 'video' ? <Video size={24} /> : <Image size={24} />}
+                <span className="text-sm">{candidate.file_name}</span>
+              </div>
+            )
+          }
+
+          {/* ── GPS ── */}
+          {hasGPS && (
+            <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-gray-400">
+              <MapPin size={12} className="text-emerald-500" />
+              <span>{parseFloat(candidate.gps_lat).toFixed(6)}, {parseFloat(candidate.gps_lng).toFixed(6)}</span>
+            </div>
+          )}
+
+          {/* ── Detection Info (AI side) ── */}
+          <DetectionInfoCard candidate={candidate} />
+
+          {/* ── Mapped Element — reviewer may override before proceeding ── */}
+          <MappedElementCard
+            candidate={candidate}
+            overrideElementType={overrideElementType}
+            onChangeOverride={setOverrideElementType}
+          />
+
+          {/* ── Mapping fallback notice ── */}
+          {!candidate.mapped_urban_element_id && candidate.suggested_element_type && (
+            <div className="flex items-start gap-2 text-xs bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-500/20 rounded-xl px-3 py-2">
+              <Info size={12} className="text-amber-500 flex-shrink-0 mt-0.5" />
+              <span className="text-amber-700 dark:text-amber-300">
+                لم يُعثر على تعيين محدد لهذا النوع. يمكنك تغيير العنصر أعلاه قبل المتابعة.
+              </span>
+            </div>
+          )}
+
+          {/* ── Wizard navigation note ── */}
+          <div className="flex items-start gap-2 text-xs bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-500/20 rounded-xl px-3 py-2">
+            <Info size={12} className="text-blue-500 flex-shrink-0 mt-0.5" />
+            <span className="text-blue-700 dark:text-blue-300">
+              بعد النقر على «متابعة» ستنتقل إلى معالج إنشاء البلاغ (6 خطوات) الذي يجمع الجهة المسؤولة والتفاصيل والمخالفات — نفس مسار البلاغات اليدوية تماماً.
+            </span>
+          </div>
+
+          {/* ── Actions ── */}
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={() => onConfirm(finalElementType)}
+              disabled={!finalElementType}
+              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              <CheckCircle2 size={14} /> متابعة لمعالج البلاغ ←
+            </button>
+            <button onClick={onClose}
+              className="px-5 text-sm text-slate-500 hover:text-slate-800 dark:text-gray-400 dark:hover:text-white transition-colors font-medium">
+              إلغاء
+            </button>
+          </div>
+
+          {/* ── Governance note ── */}
+          <p className="text-xs text-slate-400 dark:text-gray-600 text-center">
+            لا يُنشأ بلاغ تلقائياً — يتطلب إتمام المعالج (6 خطوات) ويمر بنفس مسار حوكمة البلاغات
+          </p>
         </div>
       </div>
     </div>
@@ -405,6 +579,7 @@ function buildUploadUrl(filePath) {
 function CandidateCard({ c, isPending, onConfirm, onReject, onTag }) {
   const src    = SOURCE_META[c.detection_source] ?? SOURCE_META.manual
   const hasGPS = c.gps_lat != null && c.gps_lng != null
+  const hasBbox = Array.isArray(c.detection_bbox) && c.detection_bbox.length === 4
 
   // Prefer thumbnail, fall back to original file for images
   const previewUrl = c.thumbnail_path
@@ -413,10 +588,14 @@ function CandidateCard({ c, isPending, onConfirm, onReject, onTag }) {
       ? buildUploadUrl(c.file_path)
       : null
 
+  // Display the mapped UrbanAI element (preferred) or raw AI suggestion
+  const displayElement = c.mapped_urban_element_label ?? c.suggested_element_label ?? c.suggested_element_type
+  const isMapped = !!c.mapped_urban_element_id
+
   return (
     <div className="bg-white dark:bg-gray-900 rounded-2xl border border-slate-200 dark:border-gray-800 overflow-hidden hover:shadow-md transition-shadow">
-      {/* Thumbnail */}
-      <div className="h-36 bg-slate-100 dark:bg-gray-800 flex items-center justify-center">
+      {/* Thumbnail with bbox indicator */}
+      <div className="relative h-36 bg-slate-100 dark:bg-gray-800 flex items-center justify-center overflow-hidden">
         {previewUrl
           ? <img src={previewUrl} alt="" className="w-full h-full object-cover"
               onError={e => { e.currentTarget.style.display = 'none'; e.currentTarget.nextSibling?.removeAttribute('hidden') }} />
@@ -425,23 +604,35 @@ function CandidateCard({ c, isPending, onConfirm, onReject, onTag }) {
           {c.file_type === 'video' ? <Video size={28} /> : <Image size={28} />}
           <span className="text-xs text-center px-2 truncate max-w-[120px]">{c.file_name}</span>
         </div>
+        {/* BBox indicator badge */}
+        {hasBbox && (
+          <div className="absolute top-2 right-2 bg-amber-400/90 text-black text-xs font-bold px-1.5 py-0.5 rounded-md flex items-center gap-1">
+            <Crosshair size={10} /> bbox
+          </div>
+        )}
+        {/* Confidence badge */}
+        {c.detection_confidence != null && (
+          <div className="absolute bottom-2 right-2 bg-black/60 text-white text-xs font-medium px-1.5 py-0.5 rounded-md">
+            {(c.detection_confidence * 100).toFixed(0)}%
+          </div>
+        )}
       </div>
 
       <div className="p-4 space-y-2.5">
-        {/* Source badge + element suggestion */}
+        {/* Source badge + mapped element */}
         <div className="flex flex-wrap gap-1.5">
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${src.cls}`}>{src.label}</span>
-          {c.detection_confidence != null && (
-            <span className="text-xs text-slate-400 dark:text-gray-500 self-center">
-              {(c.detection_confidence * 100).toFixed(0)}% ثقة
-            </span>
-          )}
-          {c.suggested_element_type && (
-            <span className="text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 px-2 py-0.5 rounded-full">
-              {c.suggested_element_type}
+          {isMapped && (
+            <span className="text-xs bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-2 py-0.5 rounded-full flex items-center gap-1">
+              <ArrowRightLeft size={9} /> مُعيَّن
             </span>
           )}
         </div>
+
+        {/* Mapped / suggested element label */}
+        {displayElement && (
+          <p className="text-sm font-semibold text-slate-800 dark:text-white leading-tight">{displayElement}</p>
+        )}
 
         {/* GPS */}
         <div className={`flex items-center gap-1.5 text-xs ${hasGPS ? 'text-slate-500 dark:text-gray-400' : 'text-amber-500'}`}>
@@ -473,7 +664,7 @@ function CandidateCard({ c, isPending, onConfirm, onReject, onTag }) {
             <div className="flex gap-2">
               <button onClick={() => onConfirm(c)}
                 className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-50 dark:bg-emerald-900/20 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 text-xs font-semibold py-2 rounded-lg transition-colors">
-                <CheckCircle2 size={13} /> تأكيد وإنشاء بلاغ
+                <CheckCircle2 size={13} /> مراجعة وتأكيد
               </button>
               <button onClick={() => onReject(c)}
                 className="flex-1 flex items-center justify-center gap-1.5 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 text-xs font-semibold py-2 rounded-lg transition-colors">
@@ -536,7 +727,8 @@ export default function IngestionQueue() {
   const [loading, setLoading]         = useState(false)
   const [loadErr, setLoadErr]         = useState(null)
 
-  // Dialog state — confirm is now a navigation, only reject/tag need modals
+  // Dialog state
+  const [confirmTarget, setConfirmTarget] = useState(null)
   const [rejectTarget, setRejectTarget]   = useState(null)
   const [tagTarget, setTagTarget]         = useState(null)
 
@@ -642,6 +834,20 @@ export default function IngestionQueue() {
 
   function clearDone() {
     setPendingFiles(prev => prev.filter(e => e.status !== 'done'))
+  }
+
+  // ── Confirm candidate — navigates to report creation wizard ─────────────
+  // Governance: no report is created here. The wizard (ReportNew, 6 steps)
+  // handles creation and marks the candidate as confirmed via POST /api/reports.
+
+  function submitConfirm(finalElementType) {
+    const defaultMapped = confirmTarget.mapped_urban_element_id
+      ?? confirmTarget.suggested_element_type
+    const elementParam = finalElementType && finalElementType !== defaultMapped
+      ? `&element=${encodeURIComponent(finalElementType)}`
+      : ''
+    navigate(`/reports/new?candidateId=${confirmTarget.id}${elementParam}`)
+    setConfirmTarget(null)
   }
 
   // ── Reject candidate ───────────────────────────────────────────────────────
@@ -915,7 +1121,7 @@ export default function IngestionQueue() {
               {candidates.map(c => (
                 <CandidateCard
                   key={c.id} c={c} isPending={isPending}
-                  onConfirm={c => navigate(`/reports/new?candidateId=${c.id}`)}
+                  onConfirm={setConfirmTarget}
                   onReject={setRejectTarget}
                   onTag={setTagTarget}
                 />
@@ -923,6 +1129,15 @@ export default function IngestionQueue() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Confirm dialog — full review with bbox + mapping layers */}
+      {confirmTarget && (
+        <ConfirmModal
+          candidate={confirmTarget}
+          onConfirm={submitConfirm}
+          onClose={() => setConfirmTarget(null)}
+        />
       )}
 
       {/* Reject dialog */}

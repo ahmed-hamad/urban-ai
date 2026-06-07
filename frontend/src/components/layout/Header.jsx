@@ -7,7 +7,7 @@ import { Bell, Sun, Moon, Plus, ChevronDown, X, CheckCheck } from 'lucide-react'
 const breadcrumbs = {
   '/': 'لوحة التحكم', '/reports': 'سلة البلاغات', '/map': 'الخريطة الذكية',
   '/financial': 'التوقع المالي', '/users': 'المستخدمون',
-  '/audit': 'سجل التدقيق', '/analyze': 'تحليل المرئيات', '/violations': 'اللائحة والغرامات',
+  '/audit': 'سجل التدقيق', '/ingestion': 'رفع الصور والكشف', '/violations': 'اللائحة والغرامات',
 }
 
 const TYPE_ICON = {

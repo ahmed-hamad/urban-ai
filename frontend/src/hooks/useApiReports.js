@@ -66,6 +66,7 @@ export function normalizeApiReport(r) {
     // identity
     id:            r.id,
     fromApi:       true,
+    reportNumber:  r.report_number ?? null,
 
     // display labels
     title:         r.element_label || r.element_id || 'بلاغ مستورد',
@@ -73,6 +74,14 @@ export function normalizeApiReport(r) {
     element:       r.element_id    || '',
     elementLabel:  r.element_label || '',
     elementColor:  '#3B82F6',
+
+    // assignment
+    entity:        r.entity_name || r.entity_id || '',
+    entityId:      r.entity_id     || '',
+    entityType:    r.entity_type   || null,
+    assignedTo:    r.assigned_to   || null,
+    assignedToName: r.assigned_to_name || '',
+    created_by_name: r.created_by_name || '',
 
     // location
     coords:        hasCoords ? [parseFloat(r.gps_lat), parseFloat(r.gps_lng)] : null,
@@ -85,13 +94,6 @@ export function normalizeApiReport(r) {
     closureNotes:  r.closure_notes || '',
     source:        r.ingestion_source,
     ingestion_source: r.ingestion_source,
-
-    // assignment
-    entity:        r.entity_id     || '',
-    entityId:      r.entity_id     || '',
-    assignedTo:    r.assigned_to   || null,
-    assignedToName: r.assigned_to_name || '',
-    created_by_name: r.created_by_name || '',
 
     // spatial enrichment
     municipalityId: r.municipality_id || null,

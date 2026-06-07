@@ -187,71 +187,19 @@ function AIPanel() {
 
   const renderText = (text) => {
     if (!text) return null
-
-    const segments = []
-    let textLines = []
-    for (const line of text.split('\n')) {
-      if (line.trim().startsWith('|')) {
-        if (textLines.length) { segments.push({ type: 'text', lines: textLines }); textLines = [] }
-        const prev = segments[segments.length - 1]
-        if (prev?.type === 'table') prev.lines.push(line.trim())
-        else segments.push({ type: 'table', lines: [line.trim()] })
-      } else {
-        textLines.push(line)
-      }
-    }
-    if (textLines.length) segments.push({ type: 'text', lines: textLines })
-
-    return segments.map((seg, si) => {
-      if (seg.type === 'table') {
-        const dataRows = seg.lines
-          .filter(l => !l.match(/^\|[\s\-:|]+\|$/))
-          .map(l => l.split('|').slice(1, -1).map(c => c.trim()))
-        if (dataRows.length < 1) return null
-        const [headers, ...bodyRows] = dataRows
+    return text.split('\n').map((line, i) => {
+      if (!line.trim()) return <br key={i} />
+      if (line.includes('**')) {
+        const parts = line.split(/\*\*(.*?)\*\*/g)
         return (
-          <div key={si} className="overflow-x-auto rounded-xl border border-slate-200 dark:border-gray-700 my-1">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-slate-200 dark:border-gray-700 bg-slate-100 dark:bg-gray-800">
-                  {headers.map((h, j) => (
-                    <th key={j} className="text-right px-2 py-1.5 text-slate-600 dark:text-gray-300 font-semibold whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {bodyRows.map((row, j) => (
-                  <tr key={j} className="border-b border-slate-100 dark:border-gray-700/50 last:border-0 hover:bg-slate-50 dark:hover:bg-gray-800/50">
-                    {row.map((cell, k) => (
-                      <td key={k} className="px-2 py-1.5 text-slate-600 dark:text-gray-300 whitespace-nowrap">{cell}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <p key={i} className="text-xs leading-relaxed text-slate-600 dark:text-gray-300">
+            {parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-slate-800 dark:text-white">{p}</strong> : p)}
+          </p>
         )
       }
-
-      return seg.lines.map((line, i) => {
-        const key = `${si}-${i}`
-        if (!line.trim()) return <br key={key} />
-        if (line.match(/^#{1,3}\s/))
-          return <p key={key} className="text-xs font-semibold text-slate-800 dark:text-white mt-1.5 mb-0.5">{line.replace(/^#{1,3}\s+/, '')}</p>
-        if (line.match(/^---+$/))
-          return <hr key={key} className="border-slate-200 dark:border-gray-700 my-1" />
-        if (line.includes('**')) {
-          const parts = line.split(/\*\*(.*?)\*\*/g)
-          return (
-            <p key={key} className="text-xs leading-relaxed text-slate-600 dark:text-gray-300">
-              {parts.map((p, j) => j % 2 === 1 ? <strong key={j} className="text-slate-800 dark:text-white">{p}</strong> : p)}
-            </p>
-          )
-        }
-        if (line.startsWith('⚠️') || line.startsWith('ℹ️'))
-          return <p key={key} className="text-xs text-amber-600 dark:text-amber-400 leading-relaxed">{line}</p>
-        return <p key={key} className="text-xs leading-relaxed text-slate-600 dark:text-gray-300">{line}</p>
-      })
+      if (line.startsWith('⚠️') || line.startsWith('ℹ️'))
+        return <p key={i} className="text-xs text-amber-600 dark:text-amber-400 leading-relaxed">{line}</p>
+      return <p key={i} className="text-xs leading-relaxed text-slate-600 dark:text-gray-300">{line}</p>
     })
   }
 

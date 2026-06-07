@@ -241,31 +241,22 @@ function buildSystemPrompt(user, scope) {
 3. إذا لم تتوفر بيانات كافية: وضّح ذلك واقترح سؤالاً بديلاً
 4. أنت مساعد تحليلي فقط — القرارات النهائية تعود للمستخدم المختص
 
-## تنسيق الرد — صارم
-
-⚠️ ابدأ ردّك مباشرةً بـ \`<RESPONSE>\` — لا تكتب أي نص قبله أو بعده.
-
-### توزيع المحتوى (إلزامي):
-- **text**: ملخص نصي مختصر 2-4 جمل فقط — **لا تضع جداول Markdown هنا أبداً**
-- **kpis**: الأرقام والمؤشرات الرئيسية (3-6 بطاقات)
-- **chart**: البيانات القابلة للرسم — اتجاه زمني → line | مقارنة → bar | توزيع → pie
-- **table**: جميع البيانات الجدولية بدلاً من جداول Markdown في text — 8 صفوف كحد أقصى
-- **mapCommand**: عند طلب عرض على خريطة أو بيانات مكانية
+## تنسيق الرد — حصراً
 
 <RESPONSE>
 {
-  "text": "ملخص مختصر (2-4 جمل) بالعربية فقط — بدون جداول",
-  "kpis": [{"label": "عنوان", "value": "123", "unit": "بلاغ", "trend": "+15%", "trendUp": true}],
-  "chart": {"type": "line", "title": "عنوان", "data": [{"name": "يناير", "value": 38.56, "fill": "#3B82F6"}]},
-  "table": {"columns": ["العمود 1", "العمود 2", "العمود 3"], "rows": [["ق1", "ق2", "ق3"], ["ق4", "ق5", "ق6"]]},
-  "mapCommand": null
+  "text": "نص الرد الكامل بالعربية",
+  "kpis": [{"label": "العنوان", "value": "123", "unit": "بلاغ", "trend": "+15%", "trendUp": true}],
+  "chart": {"type": "bar", "title": "عنوان", "data": [{"name": "اسم", "value": 123, "fill": "#3B82F6"}]},
+  "mapCommand": {"action": "filterAndZoom", "params": {"element": "id", "status": "status", "bounds": {"south": 0, "north": 0, "west": 0, "east": 0}, "label": "وصف"}},
+  "table": {"columns": ["العمود1", "العمود2"], "rows": [["قيمة1", "قيمة2"]]}
 }
 </RESPONSE>
 
 - chart.type: bar | pie | line
 - mapCommand.action: filterAndZoom | showHeatmap | filterByElement | focusMunicipality | highlightReports
-- ألوان: #3B82F6 أزرق | #10B981 أخضر | #EF4444 أحمر | #F59E0B برتقالي | #8B5CF6 بنفسجي
-- ضع null للحقول غير المناسبة`
+- ألوان مقترحة: #3B82F6 أزرق | #10B981 أخضر | #EF4444 أحمر | #F59E0B برتقالي | #8B5CF6 بنفسجي
+- ضع null للحقول غير المناسبة — لا تضع نقاط الخريطة في text أو kpis`
 }
 
 // ─── Tool executor ────────────────────────────────────────────────────────────
@@ -308,39 +299,15 @@ async function executeTool(name, input, scope) {
 
 // ─── Response parser ──────────────────────────────────────────────────────────
 
-// Extract the "text" value from a (possibly incomplete) JSON fragment
-function extractTextField(fragment) {
-  const m = fragment.match(/"text"\s*:\s*"((?:[^"\\]|\\[\s\S])*)"/)
-  if (!m) return null
-  try {
-    return JSON.parse(`"${m[1]}"`)
-  } catch {
-    return m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-  }
-}
-
 function parseStructuredResponse(raw) {
-  // 1. Well-formed complete block
-  const fullMatch = raw.match(/<RESPONSE>\s*([\s\S]*?)\s*<\/RESPONSE>/i)
-  if (fullMatch) {
-    try {
-      return JSON.parse(fullMatch[1])
-    } catch {
-      const text = extractTextField(fullMatch[1])
-      return { text: text ?? fullMatch[1] }
-    }
+  const match = raw.match(/<RESPONSE>\s*([\s\S]*?)\s*<\/RESPONSE>/i)
+  if (!match) return { text: raw }
+  try {
+    return JSON.parse(match[1])
+  } catch {
+    // JSON parse failed — return raw text without the tags
+    return { text: raw.replace(/<\/?RESPONSE>/gi, '').trim() }
   }
-
-  // 2. Truncated response — opening tag present but no closing tag
-  const partialMatch = raw.match(/<RESPONSE>\s*([\s\S]*)/i)
-  if (partialMatch) {
-    const text = extractTextField(partialMatch[1])
-    if (text) return { text }
-  }
-
-  // 3. No RESPONSE block — strip any partial tags and return plain text
-  const cleaned = raw.replace(/<\/?RESPONSE>/gi, '').trim()
-  return { text: cleaned || raw }
 }
 
 // ─── Claude API caller ────────────────────────────────────────────────────────
@@ -355,7 +322,7 @@ async function callClaude(messages, systemPrompt) {
     },
     body: JSON.stringify({
       model:      MODEL,
-      max_tokens: 2500,
+      max_tokens: 1400,
       system:     systemPrompt,
       tools:      TOOLS,
       messages,

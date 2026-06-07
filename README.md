@@ -84,9 +84,14 @@ npm run dev
 ## تشغيل الـ Backend
 
 ```bash
+# تثبيت اعتمادات إعداد قاعدة البيانات في جذر المشروع
+npm install
+cp .env.example .env
+npm run setup-db
+
+# تشغيل خادم الـ backend
 cd backend
 cp ../.env.example .env
-# عدّل قيم .env (DATABASE_URL, JWT_SECRET, …)
 npm install
 npm run dev
 # يعمل على http://localhost:3001

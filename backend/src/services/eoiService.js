@@ -40,12 +40,13 @@ export async function getOperationalSummary({ month, municipalityName } = {}) {
     SELECT
       COUNT(*)::int AS total_reports,
 
-      -- Auto closed: visit_status field contains the canonical auto-close marker
-      COUNT(*) FILTER (WHERE visit_status ILIKE 'بلاغ مغلق آليا')::int AS auto_closed_reports,
-
-      -- Closed manually: closure_status indicates closed AND NOT auto-closed
+      -- Closed manually: closure_status indicates closed (not auto)
       COUNT(*) FILTER (WHERE (closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%')
-                          AND visit_status NOT ILIKE 'بلاغ مغلق آليا')::int AS closed_reports,
+                          AND closure_status NOT ILIKE '%آلي%')::int AS closed_reports,
+
+      -- Auto closed: closure_status OR report_status indicates automatic closure
+      COUNT(*) FILTER (WHERE closure_status ILIKE '%آلي%'
+                          OR report_status  ILIKE '%آلي%')::int AS auto_closed_reports,
 
       -- In progress: closure_status OR report_status indicates in-progress
       COUNT(*) FILTER (WHERE closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%'
@@ -106,9 +107,10 @@ export async function getStatusBreakdown({ month, municipalityName, groupBy = 'm
     SELECT
       ${groupCol} AS group_name,
       COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE visit_status ILIKE 'بلاغ مغلق آليا')::int AS auto_closed,
       COUNT(*) FILTER (WHERE (closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%')
-                          AND visit_status NOT ILIKE 'بلاغ مغلق آليا')::int AS closed,
+                          AND closure_status NOT ILIKE '%آلي%')::int AS closed,
+      COUNT(*) FILTER (WHERE closure_status ILIKE '%آلي%'
+                          OR report_status  ILIKE '%آلي%')::int      AS auto_closed,
       COUNT(*) FILTER (WHERE closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%'
                           OR report_status  ILIKE '%تنفيذ%' OR report_status  ILIKE '%progress%')::int AS in_progress,
       COUNT(*) FILTER (WHERE visit_status IS NOT NULL AND visit_status NOT ILIKE '%لم%' AND visit_status != '')::int AS visited,
@@ -164,47 +166,11 @@ export async function getVisitStatusAnalysis({ month, municipalityName } = {}) {
   return { byVisit, cross, alerts: alertRow }
 }
 
-// ─── Visit Status Drill-down ──────────────────────────────────────────────────
-
-export async function getVisitDrill({ month, visitStatus, municipalityName } = {}) {
-  const params = []
-  let where = 'WHERE 1=1'
-  if (month)            { params.push(month);                   where += ` AND observation_month=$${params.length}` }
-  if (visitStatus === 'غير محدد') {
-    where += ` AND (visit_status IS NULL OR visit_status = '')`
-  } else if (visitStatus) {
-    params.push(visitStatus); where += ` AND visit_status=$${params.length}`
-  }
-  if (municipalityName) { params.push(`%${municipalityName}%`); where += ` AND municipality_name ILIKE $${params.length}` }
-
-  const { rows } = await pool.query(`
-    SELECT
-      element_name,
-      municipality_name,
-      lat::double precision   AS lat,
-      lng::double precision   AS lng,
-      observation_date,
-      closure_date,
-      report_number,
-      visit_status,
-      closure_status,
-      report_status
-    FROM eoi_observations ${where}
-    ORDER BY observation_date DESC
-    LIMIT 500
-  `, params)
-  return rows
-}
-
 // ─── In-Progress Analysis ─────────────────────────────────────────────────────
 
 export async function getInProgressAnalysis({ month, municipalityName, stalledDays = 30 } = {}) {
   const params = []
-  // report_status field (migration 021) is the authoritative in-progress flag from uploaded data
-  let where = `WHERE (
-    closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%'
-    OR report_status ILIKE '%تنفيذ%' OR report_status ILIKE '%قيد%' OR report_status ILIKE '%progress%'
-  )`
+  let where = `WHERE (closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%')`
   if (month)            { where += ` AND observation_month=$${params.length+1}`; params.push(month) }
   if (municipalityName) { where += ` AND municipality_name ILIKE $${params.length+1}`; params.push(`%${municipalityName}%`) }
 
@@ -292,48 +258,26 @@ export async function getRepeatedAnalysis({ month, municipalityName } = {}) {
 
 export async function getClosureQuality({ month, municipalityName } = {}) {
   const params = []
-  let conditions = '1=1'
-  if (month)            { params.push(month);                   conditions += ` AND observation_month=$${params.length}` }
-  if (municipalityName) { params.push(`%${municipalityName}%`); conditions += ` AND municipality_name ILIKE $${params.length}` }
+  let where = 'WHERE 1=1'
+  if (month)            { where += ` AND observation_month=$${params.length+1}`; params.push(month) }
+  if (municipalityName) { where += ` AND municipality_name ILIKE $${params.length+1}`; params.push(`%${municipalityName}%`) }
 
-  // Good closure = closed AND the same element at the same location (≤25 m) is NOT
-  // re-observed within 60 days after the closure date.
   const { rows } = await pool.query(`
-    WITH closed_rows AS (
-      SELECT
-        a.id,
-        a.municipality_name,
-        -- quality = true when no re-observation within 25 m + same element within 60 days
-        NOT EXISTS (
-          SELECT 1 FROM eoi_observations b
-          WHERE b.id             != a.id
-            AND b.element_name   =  a.element_name
-            AND a.closure_date   IS NOT NULL
-            AND b.observation_date >  a.closure_date
-            AND b.observation_date <= a.closure_date + INTERVAL '60 days'
-            AND a.lat IS NOT NULL AND a.lng IS NOT NULL
-            AND b.lat IS NOT NULL AND b.lng IS NOT NULL
-            AND ST_DWithin(
-              ST_SetSRID(ST_MakePoint(a.lng::double precision, a.lat::double precision), 4326)::geography,
-              ST_SetSRID(ST_MakePoint(b.lng::double precision, b.lat::double precision), 4326)::geography,
-              25
-            )
-        ) AS is_quality
-      FROM eoi_observations a
-      WHERE ${conditions}
-        AND (a.closure_status ILIKE '%مغلق%' OR a.closure_status ILIKE '%closed%')
-    )
     SELECT
       municipality_name,
-      COUNT(*)::int                                             AS total_closed,
-      COUNT(*) FILTER (WHERE is_quality)::int                  AS closed_no_reobs,
-      ROUND(
-        COUNT(*) FILTER (WHERE is_quality)::numeric
-        / NULLIF(COUNT(*), 0) * 100, 1
-      )                                                        AS closure_quality_pct
-    FROM closed_rows
+      COUNT(*) FILTER (WHERE closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%')::int AS total_closed,
+      COUNT(*) FILTER (WHERE (closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%') AND repeated_count = 0)::int AS closed_no_reobs,
+      CASE WHEN COUNT(*) FILTER (WHERE closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%') > 0
+        THEN ROUND(
+          COUNT(*) FILTER (WHERE (closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%') AND repeated_count = 0)::numeric /
+          NULLIF(COUNT(*) FILTER (WHERE closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%'), 0) * 100, 1
+        )
+        ELSE NULL
+      END AS closure_quality_pct
+    FROM eoi_observations ${where}
     GROUP BY municipality_name
-    ORDER BY closure_quality_pct DESC NULLS LAST
+    HAVING COUNT(*) FILTER (WHERE closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%') > 0
+    ORDER BY closure_quality_pct DESC
   `, params)
   return rows
 }
@@ -404,30 +348,16 @@ export async function getEarlyWarning(month) {
     [month]
   )
 
-  // Confidence based on deviation from official VPI (not data coverage).
-  // Thresholds: ≤10% → high · 11-20% → medium · >21% → low
-  let effectiveConfidence = 'medium'
-  const compareVPI = officialSameMonth || official
-  if (compareVPI && liveVPI?.estimated_vpi != null) {
-    const est = parseFloat(liveVPI.estimated_vpi)
-    const off = parseFloat(compareVPI.vpi)
-    if (off > 0) {
-      const deviation = Math.abs((est - off) / off * 100)
-      effectiveConfidence = deviation > 21 ? 'low' : deviation > 10 ? 'medium' : 'high'
-    }
-  }
-  const enrichedLiveVPI = liveVPI ? { ...liveVPI, confidence_score: effectiveConfidence } : null
-
   return {
     month,
-    liveVPI:              enrichedLiveVPI,
+    liveVPI,
     officialLastVPI:      official         || null,
     officialSameMonthVPI: officialSameMonth || null,
     target:               target            || null,
     operational:          opsData,
     topMunicipalities:    topMunis.slice(0, 5),
     topElements:          topElems.slice(0, 5),
-    warnings:             _buildWarnings(enrichedLiveVPI, official, target, opsData),
+    warnings:             _buildWarnings(liveVPI, official, target, opsData),
   }
 }
 
@@ -438,7 +368,9 @@ function _buildWarnings(liveVPI, official, target, ops) {
     const tgt = parseFloat(target.vpi_target)
     if (est > tgt) warnings.push({ level: 'danger', msg: `المؤشر التقديري الحالي ${est.toFixed(1)} يتجاوز المستهدف ${tgt}` })
   }
-  // Note: low-data coverage warning removed — confidence now based on deviation from official VPI.
+  if (liveVPI?.confidence_score === 'low') {
+    warnings.push({ level: 'info', msg: 'بيانات الشهر الحالي قليلة — مستوى الثقة منخفض (أقل من 30% من أيام الشهر)' })
+  }
   if (ops.in_progress_rate > 40) {
     warnings.push({ level: 'warning', msg: `${ops.in_progress_rate.toFixed(1)}% من البلاغات قيد التنفيذ — نسبة مرتفعة` })
   }
@@ -466,22 +398,18 @@ export async function generateEOISummary(month) {
   // Total reports
   lines.push(`بلغ عدد البلاغات المرصودة من المصادر الخارجية خلال ${label} ${ops.total_reports.toLocaleString('en-US')} بلاغاً.`)
 
-  // Top municipality by estimated_units (most impactful on VPI, not by report count)
-  const sortedMunis = [...topMunis].sort((a, b) => parseFloat(b.estimated_units || 0) - parseFloat(a.estimated_units || 0))
-  if (sortedMunis.length > 0) {
-    const topM    = sortedMunis[0]
-    const totalUnits = topMunis.reduce((s, r) => s + parseFloat(r.estimated_units || 0), 0)
-    const unitsPct = totalUnits > 0 ? (parseFloat(topM.estimated_units || 0) / totalUnits * 100).toFixed(1) : 0
-    lines.push(`تشكّل بلدية ${topM.group_name} ${unitsPct}% من إجمالي الوحدات التقديرية وهي الأكثر تأثيراً على مؤشر VPI.`)
+  // Top municipality
+  if (topMunis.length > 0) {
+    const topM = topMunis[0]
+    const pct  = ops.total_reports > 0 ? (topM.total / ops.total_reports * 100).toFixed(1) : 0
+    lines.push(`تشكّل بلدية ${topM.group_name} ${pct}% من إجمالي البلاغات المرصودة.`)
   }
 
-  // Top element by estimated_units
-  const sortedElems = [...topElems].sort((a, b) => parseFloat(b.estimated_units || 0) - parseFloat(a.estimated_units || 0))
-  if (sortedElems.length > 0) {
-    const topE    = sortedElems[0]
-    const totalUnits = topElems.reduce((s, r) => s + parseFloat(r.estimated_units || 0), 0)
-    const unitsPct = totalUnits > 0 ? (parseFloat(topE.estimated_units || 0) / totalUnits * 100).toFixed(1) : 0
-    lines.push(`يمثّل عنصر "${topE.group_name}" أعلى عنصر تأثيراً بنسبة ${unitsPct}% من الوحدات التقديرية.`)
+  // Top element
+  if (topElems.length > 0) {
+    const topE = topElems[0]
+    const pct  = ops.total_reports > 0 ? (topE.total / ops.total_reports * 100).toFixed(1) : 0
+    lines.push(`يمثّل عنصر "${topE.group_name}" أعلى عنصر تأثيراً بنسبة ${pct}%.`)
   }
 
   // Operational KPIs
@@ -517,21 +445,15 @@ export async function generateEOISummary(month) {
 function _buildInsights(ops, liveVPI, topMunis, topElems, inProg) {
   const insights = []
 
-  if (topMunis.length > 0) {
-    const sorted    = [...topMunis].sort((a, b) => parseFloat(b.estimated_units||0) - parseFloat(a.estimated_units||0))
-    const top       = sorted[0]
-    const totalUnits = topMunis.reduce((s, r) => s + parseFloat(r.estimated_units||0), 0)
-    const unitsPct  = totalUnits > 0 ? (parseFloat(top.estimated_units||0) / totalUnits * 100).toFixed(1) : 0
-    const level     = parseFloat(unitsPct) > 35 ? 'warning' : 'info'
-    insights.push({ type: level, title: 'أعلى بلدية تأثيراً على VPI', body: `${top.group_name} — ${unitsPct}% من الوحدات التقديرية (${Number(top.estimated_units||0).toLocaleString('en-US')} وحدة)` })
+  if (topMunis.length > 0 && ops.total_reports > 0) {
+    const top   = topMunis[0]
+    const pct   = (top.total / ops.total_reports * 100).toFixed(1)
+    const level = parseFloat(pct) > 35 ? 'warning' : 'info'
+    insights.push({ type: level, title: 'أعلى بلدية تأثيراً', body: `${top.group_name} — ${pct}% من إجمالي البلاغات (${top.total.toLocaleString('en-US')} بلاغ)` })
   }
 
   if (topElems.length > 0) {
-    const sorted    = [...topElems].sort((a, b) => parseFloat(b.estimated_units||0) - parseFloat(a.estimated_units||0))
-    const top       = sorted[0]
-    const totalUnits = topElems.reduce((s, r) => s + parseFloat(r.estimated_units||0), 0)
-    const unitsPct  = totalUnits > 0 ? (parseFloat(top.estimated_units||0) / totalUnits * 100).toFixed(1) : 0
-    insights.push({ type: 'info', title: 'أعلى عنصر تأثيراً على VPI', body: `"${top.group_name}" — ${unitsPct}% من الوحدات التقديرية (${Number(top.estimated_units||0).toLocaleString('en-US')} وحدة)` })
+    insights.push({ type: 'info', title: 'أكثر عنصر رصداً', body: `"${topElems[0].group_name}" — ${topElems[0].total.toLocaleString('en-US')} بلاغ` })
   }
 
   if (ops.visit_compliance_rate < 60) {
@@ -545,7 +467,7 @@ function _buildInsights(ops, liveVPI, topMunis, topElems, inProg) {
   }
 
   if (liveVPI?.confidence_score === 'high' && liveVPI?.estimated_vpi != null) {
-    insights.push({ type: 'success', title: 'توقع موثوق', body: `مستوى ثقة مرتفع — انحراف المؤشر التقديري عن الرسمي ≤ 10%` })
+    insights.push({ type: 'success', title: 'توقع موثوق', body: `بيانات كافية — مستوى ثقة مرتفع (${(liveVPI.data_days / liveVPI.days_in_month * 100).toFixed(0)}% من أيام الشهر)` })
   }
 
   return insights
@@ -648,36 +570,28 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
   )
   const coveredArea = covRow?.covered ? parseFloat(covRow.covered) : null
 
-  // Totals for the month (full + adjusted)
+  // Totals for the month
   const { rows: [totals] } = await pool.query(`
     SELECT
-      COUNT(*)::int                    AS total_reports,
-      COALESCE(SUM(estimated_units),0) AS total_units,
-      -- Adjusted: exclude visit_status = 'بلاغ خاطئ' (NULL-safe)
-      COUNT(*) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%')::int AS adj_reports,
-      COALESCE(SUM(estimated_units) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%'), 0) AS adj_units
+      COUNT(*)::int                   AS total_reports,
+      COALESCE(SUM(estimated_units),0) AS total_units
     FROM eoi_observations ${where}
   `, params)
 
-  const totalUnits   = parseFloat(totals.total_units)  || 0
-  const totalReports = totals.total_reports             || 0
-  const adjUnits     = parseFloat(totals.adj_units)     || 0
-  const adjReports   = totals.adj_reports               || 0
-  const overallVPI   = (coveredArea && coveredArea > 0) ? totalUnits / coveredArea : null
-  const adjOverallVPI = (coveredArea && coveredArea > 0) ? adjUnits / coveredArea : null
+  const totalUnits    = parseFloat(totals.total_units) || 0
+  const totalReports  = totals.total_reports || 0
+  const overallVPI    = (coveredArea && coveredArea > 0) ? totalUnits / coveredArea : null
 
-  // By municipality (with adj units)
+  // By municipality
   const { rows: byMuni } = await pool.query(`
     SELECT
       municipality_name,
       COUNT(*)::int                    AS total_reports,
       COALESCE(SUM(estimated_units),0) AS estimated_units,
-      COALESCE(SUM(estimated_units) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%'), 0) AS adj_units,
-      COUNT(*) FILTER (WHERE visit_status ILIKE 'بلاغ مغلق آليا')::int AS auto_closed,
       COUNT(*) FILTER (WHERE (closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%')
-                          AND visit_status NOT ILIKE 'بلاغ مغلق آليا')::int AS closed,
-      COUNT(*) FILTER (WHERE closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%'
-                          OR report_status ILIKE '%تنفيذ%' OR report_status ILIKE '%قيد%')::int AS in_progress
+                          AND closure_status NOT ILIKE '%آلي%')::int AS closed,
+      COUNT(*) FILTER (WHERE closure_status ILIKE '%آلي%')::int      AS auto_closed,
+      COUNT(*) FILTER (WHERE closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%')::int AS in_progress
     FROM eoi_observations ${where}
     GROUP BY municipality_name
     HAVING COUNT(*) > 0
@@ -696,23 +610,17 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
 
   const muniRows = byMuni.map(r => {
     const units    = parseFloat(r.estimated_units) || 0
-    const adjU     = parseFloat(r.adj_units)       || 0
     const mCovered = muniCovMap[r.municipality_name] || null
-    const muniVPI    = (mCovered && mCovered > 0) ? units / mCovered : null
-    const muniAdjVPI = (mCovered && mCovered > 0) ? adjU  / mCovered : null
-    const unitsPct   = totalUnits > 0 ? units / totalUnits * 100 : 0
-    const adjUnitsPct = adjUnits > 0 ? adjU  / adjUnits   * 100 : 0
+    const muniVPI  = (mCovered && mCovered > 0) ? units / mCovered : null
+    const unitsPct = totalUnits > 0 ? units / totalUnits * 100 : 0
     const vpiContrib = (overallVPI && overallVPI > 0) ? (muniVPI != null ? muniVPI / overallVPI * 100 : null) : null
     return {
       municipality_name: r.municipality_name,
       total_reports:     r.total_reports,
       estimated_units:   units,
-      adj_units:         adjU,
       units_pct:         unitsPct,
-      adj_units_pct:     adjUnitsPct,
       covered_area_km2:  mCovered,
       estimated_vpi:     muniVPI,
-      adj_estimated_vpi: muniAdjVPI,
       vpi_contribution:  vpiContrib,
       closed:            r.closed,
       auto_closed:       r.auto_closed,
@@ -720,13 +628,12 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
     }
   })
 
-  // By element (with adj units)
+  // By element
   const { rows: byElem } = await pool.query(`
     SELECT
       element_name,
       COUNT(*)::int                    AS total_reports,
       COALESCE(SUM(estimated_units),0) AS estimated_units,
-      COALESCE(SUM(estimated_units) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%'), 0) AS adj_units,
       AVG(estimated_units)::numeric(10,4) AS avg_factor
     FROM eoi_observations ${where}
     GROUP BY element_name
@@ -736,21 +643,15 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
 
   const elemRows = byElem.map(r => {
     const units    = parseFloat(r.estimated_units) || 0
-    const adjU     = parseFloat(r.adj_units)       || 0
     const unitsPct = totalUnits > 0 ? units / totalUnits * 100 : 0
-    const adjUnitsPct = adjUnits > 0 ? adjU / adjUnits * 100 : 0
-    const elemVPI    = (coveredArea && coveredArea > 0) ? units / coveredArea : null
-    const elemAdjVPI = (coveredArea && coveredArea > 0) ? adjU  / coveredArea : null
+    const elemVPI  = (coveredArea && coveredArea > 0) ? units / coveredArea : null
     return {
-      element_name:      r.element_name,
-      total_reports:     r.total_reports,
-      estimated_units:   units,
-      adj_units:         adjU,
-      units_pct:         unitsPct,
-      adj_units_pct:     adjUnitsPct,
-      avg_factor:        parseFloat(r.avg_factor),
-      estimated_vpi:     elemVPI,
-      adj_estimated_vpi: elemAdjVPI,
+      element_name:     r.element_name,
+      total_reports:    r.total_reports,
+      estimated_units:  units,
+      units_pct:        unitsPct,
+      avg_factor:       parseFloat(r.avg_factor),
+      estimated_vpi:    elemVPI,
     }
   })
 
@@ -759,10 +660,7 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
     covered_area_km2: coveredArea,
     total_reports:    totalReports,
     total_units:      totalUnits,
-    adj_reports:      adjReports,
-    adj_units:        adjUnits,
     overall_vpi:      overallVPI,
-    adj_overall_vpi:  adjOverallVPI,
     by_municipality:  muniRows,
     by_element:       elemRows,
   }
