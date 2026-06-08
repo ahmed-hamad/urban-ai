@@ -570,35 +570,44 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
   )
   const coveredArea = covRow?.covered ? parseFloat(covRow.covered) : null
 
-  // Totals for the month
+  // Totals for the month (full + adjusted)
   const { rows: [totals] } = await pool.query(`
     SELECT
-      COUNT(*)::int                   AS total_reports,
-      COALESCE(SUM(estimated_units),0) AS total_units
+      COUNT(*)::int                    AS total_reports,
+      COALESCE(SUM(estimated_units),0) AS total_units,
+      -- Adjusted: exclude visit_status containing 'خاطئ' (NULL-safe)
+      COUNT(*) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%')::int AS adj_reports,
+      COALESCE(SUM(estimated_units) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%'), 0) AS adj_units
     FROM eoi_observations ${where}
   `, params)
 
-  const totalUnits    = parseFloat(totals.total_units) || 0
-  const totalReports  = totals.total_reports || 0
+  const totalUnits    = parseFloat(totals.total_units)  || 0
+  const totalReports  = totals.total_reports             || 0
+  const adjUnits      = parseFloat(totals.adj_units)     || 0
+  const adjReports    = totals.adj_reports               || 0
   const overallVPI    = (coveredArea && coveredArea > 0) ? totalUnits / coveredArea : null
+  const adjOverallVPI = (coveredArea && coveredArea > 0) ? adjUnits   / coveredArea : null
 
-  // By municipality
+  // By municipality (with adj units)
   const { rows: byMuni } = await pool.query(`
     SELECT
       municipality_name,
       COUNT(*)::int                    AS total_reports,
       COALESCE(SUM(estimated_units),0) AS estimated_units,
+      COALESCE(SUM(estimated_units) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%'), 0) AS adj_units,
       COUNT(*) FILTER (WHERE (closure_status ILIKE '%مغلق%' OR closure_status ILIKE '%closed%')
                           AND closure_status NOT ILIKE '%آلي%')::int AS closed,
-      COUNT(*) FILTER (WHERE closure_status ILIKE '%آلي%')::int      AS auto_closed,
-      COUNT(*) FILTER (WHERE closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%')::int AS in_progress
+      COUNT(*) FILTER (WHERE closure_status ILIKE '%آلي%'
+                          OR report_status  ILIKE '%آلي%')::int      AS auto_closed,
+      COUNT(*) FILTER (WHERE closure_status ILIKE '%تنفيذ%' OR closure_status ILIKE '%progress%'
+                          OR report_status  ILIKE '%تنفيذ%' OR report_status  ILIKE '%progress%')::int AS in_progress
     FROM eoi_observations ${where}
     GROUP BY municipality_name
     HAVING COUNT(*) > 0
     ORDER BY estimated_units DESC
   `, params)
 
-  // Per municipality: get covered area per municipality (if available), else use proportional share
+  // Per municipality: get covered area per municipality (if available)
   const { rows: muniCov } = await pool.query(`
     SELECT municipality_name, SUM(covered_area_km2) AS covered
     FROM vpi_coverage
@@ -609,18 +618,22 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
   muniCov.forEach(r => { muniCovMap[r.municipality_name] = parseFloat(r.covered) })
 
   const muniRows = byMuni.map(r => {
-    const units    = parseFloat(r.estimated_units) || 0
-    const mCovered = muniCovMap[r.municipality_name] || null
-    const muniVPI  = (mCovered && mCovered > 0) ? units / mCovered : null
-    const unitsPct = totalUnits > 0 ? units / totalUnits * 100 : 0
+    const units      = parseFloat(r.estimated_units) || 0
+    const adjU       = parseFloat(r.adj_units)       || 0
+    const mCovered   = muniCovMap[r.municipality_name] || null
+    const muniVPI    = (mCovered && mCovered > 0) ? units / mCovered : null
+    const muniAdjVPI = (mCovered && mCovered > 0) ? adjU  / mCovered : null
+    const unitsPct   = totalUnits > 0 ? units / totalUnits * 100 : 0
     const vpiContrib = (overallVPI && overallVPI > 0) ? (muniVPI != null ? muniVPI / overallVPI * 100 : null) : null
     return {
       municipality_name: r.municipality_name,
       total_reports:     r.total_reports,
       estimated_units:   units,
+      adj_units:         adjU,
       units_pct:         unitsPct,
       covered_area_km2:  mCovered,
       estimated_vpi:     muniVPI,
+      adj_estimated_vpi: muniAdjVPI,
       vpi_contribution:  vpiContrib,
       closed:            r.closed,
       auto_closed:       r.auto_closed,
@@ -628,12 +641,13 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
     }
   })
 
-  // By element
+  // By element (with adj units)
   const { rows: byElem } = await pool.query(`
     SELECT
       element_name,
       COUNT(*)::int                    AS total_reports,
       COALESCE(SUM(estimated_units),0) AS estimated_units,
+      COALESCE(SUM(estimated_units) FILTER (WHERE visit_status IS NULL OR visit_status NOT ILIKE '%خاطئ%'), 0) AS adj_units,
       AVG(estimated_units)::numeric(10,4) AS avg_factor
     FROM eoi_observations ${where}
     GROUP BY element_name
@@ -643,15 +657,19 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
 
   const elemRows = byElem.map(r => {
     const units    = parseFloat(r.estimated_units) || 0
+    const adjU     = parseFloat(r.adj_units)       || 0
     const unitsPct = totalUnits > 0 ? units / totalUnits * 100 : 0
-    const elemVPI  = (coveredArea && coveredArea > 0) ? units / coveredArea : null
+    const elemVPI    = (coveredArea && coveredArea > 0) ? units / coveredArea : null
+    const elemAdjVPI = (coveredArea && coveredArea > 0) ? adjU  / coveredArea : null
     return {
-      element_name:     r.element_name,
-      total_reports:    r.total_reports,
-      estimated_units:  units,
-      units_pct:        unitsPct,
-      avg_factor:       parseFloat(r.avg_factor),
-      estimated_vpi:    elemVPI,
+      element_name:      r.element_name,
+      total_reports:     r.total_reports,
+      estimated_units:   units,
+      adj_units:         adjU,
+      units_pct:         unitsPct,
+      avg_factor:        parseFloat(r.avg_factor),
+      estimated_vpi:     elemVPI,
+      adj_estimated_vpi: elemAdjVPI,
     }
   })
 
@@ -660,7 +678,10 @@ export async function getEOIVPIAnalysis({ month, municipalityName } = {}) {
     covered_area_km2: coveredArea,
     total_reports:    totalReports,
     total_units:      totalUnits,
+    adj_reports:      adjReports,
+    adj_units:        adjUnits,
     overall_vpi:      overallVPI,
+    adj_overall_vpi:  adjOverallVPI,
     by_municipality:  muniRows,
     by_element:       elemRows,
   }

@@ -657,6 +657,102 @@ function WarningTab({ month, months, onMonthChange, authFetch }) {
             على <strong>إجمالي المساحة المغطاة</strong> خلال الشهر (كم²).
           </span>
         </div>
+
+        {/* ── Adjusted VPI section ── */}
+        {lv.adj_estimated_vpi != null && (() => {
+          const fullVPI     = parseFloat(lv.estimated_vpi)        || 0
+          const adjVPI      = parseFloat(lv.adj_estimated_vpi)
+          const fullUnits   = parseFloat(lv.total_estimated_units) || 0
+          const adjUnits    = parseFloat(lv.adj_total_units)       || 0
+          const fullReports = lv.total_reports                     || 0
+          const adjReports  = lv.adj_total_reports                 || 0
+          const excluded    = fullReports - adjReports
+          const exclUnits   = fullUnits   - adjUnits
+          const reduction   = fullVPI > 0 ? ((fullVPI - adjVPI) / fullVPI * 100) : 0
+          const adjBarW     = fullVPI > 0 ? Math.min((adjVPI / fullVPI) * 100, 100) : 0
+
+          return (
+            <div className="bg-white dark:bg-gray-900 rounded-xl border border-slate-200 dark:border-gray-800 overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-100 dark:border-gray-800 flex items-center gap-2">
+                <Shield size={14} className="text-teal-500 flex-shrink-0" />
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-700 dark:text-gray-200">
+                    VPI التقديري المعدّل — بعد استبعاد البلاغات الخاطئة
+                  </h3>
+                  <p className="text-xs text-slate-400 dark:text-gray-500 mt-0.5">
+                    تم استبعاد البلاغات التي حالة زيارتها «منتهية بلاغ خاطئ»
+                  </p>
+                </div>
+                <span className="mr-auto text-xs px-2 py-0.5 bg-teal-50 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400 border border-teal-200 dark:border-teal-700 rounded-full font-medium">
+                  تقديري — معدّل
+                </span>
+              </div>
+
+              <div className="p-5 space-y-5">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="rounded-xl border bg-teal-50 dark:bg-teal-900/20 border-teal-200 dark:border-teal-800 p-4 text-teal-700 dark:text-teal-300">
+                    <div className="flex items-start justify-between mb-2">
+                      <p className="text-xs font-medium opacity-70">VPI التقديري المعدّل</p>
+                      <span className="text-xs px-1.5 py-0.5 bg-white/50 dark:bg-gray-900/50 rounded font-medium">معدّل</span>
+                    </div>
+                    <p className="text-2xl font-bold">{n(adjVPI)}</p>
+                    <p className="text-xs opacity-60 mt-0.5">مخالفة/كم²</p>
+                    {reduction > 0 && (
+                      <p className="text-xs mt-2 font-semibold text-emerald-600 dark:text-emerald-400">
+                        ↓ {n(reduction, 1)}% أقل من الكلي
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border bg-slate-50 dark:bg-gray-800 border-slate-200 dark:border-gray-700 p-4 text-slate-700 dark:text-gray-200">
+                    <div className="flex items-start justify-between mb-2">
+                      <p className="text-xs font-medium opacity-70">البلاغات المستبعدة</p>
+                      <span className="text-xs px-1.5 py-0.5 bg-white/50 dark:bg-gray-900/50 rounded font-medium">استبعاد</span>
+                    </div>
+                    <p className="text-2xl font-bold">{n(excluded, 0)}</p>
+                    <p className="text-xs opacity-60 mt-0.5">
+                      من أصل {n(fullReports, 0)} بلاغ ({pct(fullReports > 0 ? excluded / fullReports * 100 : 0)})
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border bg-slate-50 dark:bg-gray-800 border-slate-200 dark:border-gray-700 p-4 text-slate-700 dark:text-gray-200">
+                    <div className="flex items-start justify-between mb-2">
+                      <p className="text-xs font-medium opacity-70">الوحدات المستبعدة</p>
+                      <span className="text-xs px-1.5 py-0.5 bg-white/50 dark:bg-gray-900/50 rounded font-medium">استبعاد</span>
+                    </div>
+                    <p className="text-2xl font-bold">{n(exclUnits)}</p>
+                    <p className="text-xs opacity-60 mt-0.5">
+                      من أصل {n(fullUnits)} وحدة ({pct(fullUnits > 0 ? exclUnits / fullUnits * 100 : 0)})
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-500 dark:text-gray-400">
+                    <span>المقارنة البصرية بين VPI الكلي والمعدّل</span>
+                    <span className="tabular-nums">{n(adjVPI)} / {n(fullVPI)} وحدة/كم²</span>
+                  </div>
+                  <div className="relative h-6 bg-slate-100 dark:bg-gray-700 rounded-full overflow-hidden">
+                    <div className="absolute inset-0 flex items-center">
+                      <div className="h-full w-full bg-amber-200/60 dark:bg-amber-700/30 rounded-full" />
+                    </div>
+                    <div className="absolute inset-y-0 right-0 flex items-center transition-all duration-500"
+                         style={{ width: `${adjBarW}%` }}>
+                      <div className="h-full w-full bg-teal-500 dark:bg-teal-400 rounded-full" />
+                    </div>
+                    <div className="absolute inset-0 flex items-center justify-between px-3">
+                      <span className="text-xs font-bold text-white drop-shadow">معدّل {n(adjVPI)}</span>
+                      <span className="text-xs font-medium text-amber-700 dark:text-amber-300">كلي {n(fullVPI)}</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-400 dark:text-gray-500 text-center">
+                    الشريط التيلي = VPI بعد الاستبعاد · الشريط الكامل = VPI الكلي
+                  </p>
+                </div>
+              </div>
+            </div>
+          )
+        })()}
         </>
         )
       })()}
@@ -773,26 +869,29 @@ function VPIAnalysisTab({ month, months, onMonthChange, authFetch }) {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         {[
           { label: 'VPI التقديري الكلي',     value: data.overall_vpi,      unit: 'وحدة/كم²',   color: 'amber', badge: 'تقديري' },
-          { label: 'إجمالي الوحدات التقديرية', value: data.total_units,      unit: 'وحدة',       color: 'blue',  badge: '' },
+          { label: 'VPI التقديري المعدّل',    value: data.adj_overall_vpi,  unit: 'وحدة/كم²',   color: 'teal',  badge: 'معدّل' },
+          { label: 'إجمالي الوحدات الكلية',  value: data.total_units,      unit: 'وحدة',       color: 'blue',  badge: '' },
+          { label: 'الوحدات بعد الاستبعاد',  value: data.adj_units,        unit: 'وحدة',       color: 'blue',  badge: 'معدّل' },
           { label: 'المساحة المغطاة',         value: data.covered_area_km2, unit: 'كم²',        color: 'green', badge: '' },
           { label: 'إجمالي البلاغات',         value: data.total_reports,   unit: 'بلاغ',       color: 'slate', badge: '' },
         ].map(({ label, value, unit, color, badge }) => {
           const palette = {
             amber: 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300',
+            teal:  'bg-teal-50 dark:bg-teal-900/20 border-teal-200 dark:border-teal-800 text-teal-700 dark:text-teal-300',
             blue:  'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300',
             green: 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300',
             slate: 'bg-slate-50 dark:bg-gray-800 border-slate-200 dark:border-gray-700 text-slate-700 dark:text-gray-200',
           }
           return (
-            <div key={label} className={`rounded-xl border p-4 ${palette[color]}`}>
+            <div key={label} className={`rounded-xl border p-3 ${palette[color] || palette.slate}`}>
               <div className="flex items-start justify-between mb-1">
-                <p className="text-xs font-medium opacity-70">{label}</p>
-                {badge && <span className="text-xs px-1.5 py-0.5 bg-white/50 dark:bg-gray-900/50 rounded font-medium">{badge}</span>}
+                <p className="text-xs font-medium opacity-70 leading-tight">{label}</p>
+                {badge && <span className="text-xs px-1 py-0.5 bg-white/50 dark:bg-gray-900/50 rounded font-medium flex-shrink-0 mr-1">{badge}</span>}
               </div>
-              <p className="text-2xl font-bold">{value != null ? n(value) : '—'}</p>
+              <p className="text-xl font-bold">{value != null ? n(value) : '—'}</p>
               {unit && <p className="text-xs opacity-60 mt-0.5">{unit}</p>}
             </div>
           )
@@ -843,6 +942,7 @@ function VPIAnalysisTab({ month, months, onMonthChange, authFetch }) {
                       <th className="px-3 py-2 text-center font-medium">وحدات</th>
                       <th className="px-3 py-2 text-center font-medium">نسبة%</th>
                       <th className="px-3 py-2 text-center font-medium">VPI تقديري</th>
+                      <th className="px-3 py-2 text-center font-medium bg-teal-50 dark:bg-teal-900/20 text-teal-600 dark:text-teal-400">VPI معدّل</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-gray-800">
@@ -867,6 +967,11 @@ function VPIAnalysisTab({ month, months, onMonthChange, authFetch }) {
                               ? <span className="font-semibold text-amber-600 dark:text-amber-400">{n(row.estimated_vpi)}</span>
                               : <span className="text-slate-300">—</span>}
                           </td>
+                          <td className="px-3 py-2.5 text-center tabular-nums bg-teal-50/40 dark:bg-teal-900/10">
+                            {row.adj_estimated_vpi != null
+                              ? <span className="font-semibold text-teal-600 dark:text-teal-400">{n(row.adj_estimated_vpi)}</span>
+                              : <span className="text-slate-300">—</span>}
+                          </td>
                         </tr>
                       )
                     })}
@@ -878,6 +983,7 @@ function VPIAnalysisTab({ month, months, onMonthChange, authFetch }) {
                       <td className="px-3 py-2.5 text-center font-bold tabular-nums">{n(data.total_units)}</td>
                       <td className="px-3 py-2.5 text-center font-bold">100%</td>
                       <td className="px-3 py-2.5 text-center font-bold text-amber-600 dark:text-amber-400 tabular-nums">{n(data.overall_vpi)}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-teal-600 dark:text-teal-400 tabular-nums">{n(data.adj_overall_vpi)}</td>
                     </tr>
                   </tfoot>
                 </table>
